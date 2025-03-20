@@ -1,0 +1,28 @@
+[package]
+name = "two-round-ecdsa"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+subtle = { version = "2", default-features = false, features = ["std"] }
+zeroize = { version = "1", default-features = false, features = ["std", "derive"] }
+rand_core = { version = "0.6", default-features = false, features = ["std"] }
+rand_chacha = { version = "0.3", default-features = false, features = ["std"] }
+
+crypto-bigint = { version = "0.6", default-features = false, features = ["zeroize", "alloc"] }
+crypto-primes = { version = "=0.6.2", default-features = false }
+
+group = { version = "0.13", default-features = false, features = ["alloc"] }
+dkg = { version = "0.5", default-features = false, features = ["std"] }
+
+class-groups = { path = "../class-groups" }
+
+sha2 = { version = "0.10", default-features = false, features = ["std"], optional = true }
+k256 = { version = "0.13", default-features = false, features = ["std", "arithmetic", "bits"], optional = true }
+
+[dev-dependencies]
+ecdsa = { version = "0.16", default-features = false, features = ["std", "verifying"] }
+k256 = { version = "0.13", default-features = false, features = ["ecdsa"] }
+
+[features]
+secp256k1 = ["sha2", "k256"]

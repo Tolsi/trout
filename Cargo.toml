@@ -1,6 +1,7 @@
 [workspace]
 members = [
   "class-groups",
+  "two-round-ecdsa",
 ]
 
 [profile.dev.package]
