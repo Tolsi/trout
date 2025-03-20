@@ -1,0 +1,20 @@
+#![cfg_attr(docsrs, feature(doc_auto_cfg))]
+#![doc = include_str!("../README.md")]
+#![deny(missing_docs)]
+#![allow(non_snake_case)]
+
+pub(crate) mod compression;
+
+mod element;
+pub use element::*;
+
+mod malachite;
+pub use malachite::MalachiteElement;
+
+#[cfg(feature = "gmp")]
+mod gmp;
+#[cfg(feature = "gmp")]
+pub use gmp::GmpElement;
+
+mod class_group;
+pub use class_group::ClassGroup;

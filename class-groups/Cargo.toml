@@ -1,0 +1,15 @@
+[package]
+name = "class-groups"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+subtle = { version = "2", default-features = false, features = ["std"] }
+rand_core = { version = "0.6", default-features = false, features = ["std"] }
+crypto-bigint = { version = "0.6", default-features = false, features = ["alloc"] }
+crypto-primes = { version = "=0.6.2", default-features = false }
+malachite = { version = "0.5", default-features = false, features = ["naturals_and_integers"] }
+rug = { version = "1", default-features = false, features = ["std", "integer"], optional = true }
+
+[features]
+gmp = ["rug"]

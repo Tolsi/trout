@@ -1,0 +1,285 @@
+use core::{cmp::Ordering, ops::Neg};
+use std::sync::Arc;
+
+use ::malachite::{
+  base::num::{arithmetic::traits::*, basic::traits::*, conversion::traits::*},
+  *,
+};
+
+pub(crate) fn natural_from_bytes(bytes: &[u8]) -> Natural {
+  Natural::from_digits_desc(&256u16, bytes.iter().map(|b| (*b).into())).unwrap()
+}
+pub(crate) fn natural_to_bytes(value: &Natural) -> Vec<u8> {
+  let mut res = value
+    .to_digits_desc(&256u16)
+    .into_iter()
+    .map(|byte| byte.try_into().unwrap())
+    .collect::<Vec<_>>();
+  // This *should* never trigger in a sane-world, yet ensures we never make a non-canonical
+  // encoding
+  while res.first() == Some(&0) {
+    res.remove(0);
+  }
+  res
+}
+
+fn euclid(a: &Integer, b: &Integer) -> (Integer, Integer) {
+  let mut q = a / b;
+  let mut r = a % b;
+  if r.sign() == Ordering::Less {
+    q -= Integer::ONE;
+    r += b;
+  }
+  debug_assert_eq!((&q * b) + &r, *a);
+  (q, r)
+}
+
+fn parteucl(a: Integer, b: Integer, L: &Integer) -> (Integer, Integer, Integer, Integer, Integer) {
+  let mut v = Integer::ZERO;
+  let mut d = a;
+  let mut v2 = Integer::ONE;
+  let mut v3 = b;
+  let mut z = Integer::ZERO;
+  while v3.unsigned_abs_ref() > L {
+    let (q, t3) = euclid(&d, &v3);
+    debug_assert_eq!(&(&q * &v3) + &t3, d);
+    let t2 = &v - (&q * &v2);
+    v = v2;
+    d = v3;
+    v2 = t2;
+    v3 = t3;
+    z += Integer::ONE;
+  }
+  if z.odd() {
+    v2 = -v2;
+    v3 = -v3;
+  }
+  (v, d, v2, v3, z)
+}
+
+/// An element of a class group, implemented with the variable-time Malachite.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct MalachiteElement {
+  a: Integer,
+  b: Integer,
+  c: Integer,
+  L: Arc<Integer>,
+}
+
+impl MalachiteElement {
+  // Algorithm 5.4.2 of A Course in Computational Algebraic Number Theory
+  fn reduce(self) -> Self {
+    let Self { mut a, mut b, mut c, L } = self;
+
+    // Step 2
+    let normalize = |a: &mut Integer, b: &mut Integer, c: &mut Integer| {
+      let two_a = a.clone() << 1;
+      let (mut q, mut r) = euclid(b, &two_a);
+      if r > *a {
+        r -= two_a;
+        q += Integer::ONE;
+      }
+      *c -= ((&*b + &r) * q) >> 1;
+      *b = r;
+    };
+
+    // Step 1
+    if !((-a.clone() < b) && (b <= a)) {
+      // Step 2
+      normalize(&mut a, &mut b, &mut c);
+    }
+    // Step 3, first sentence
+    while a > c {
+      std::mem::swap(&mut a, &mut c);
+      b = -b;
+      // Go to step 2
+      normalize(&mut a, &mut b, &mut c);
+    }
+    // Step 3, second sentence
+    if (a == c) && (b.sign() == Ordering::Less) {
+      b = -b;
+    }
+
+    // Definition 5.3.2 of A Course in Computational Algebraic Number Theory
+    // This is notable as it bounds a, c to being postive. Only b may be negative
+    debug_assert!(b.clone().abs() <= a.clone());
+    debug_assert!(a.clone() <= c.clone());
+    debug_assert!(if (b.clone().abs() == a.clone()) || (a.clone() == c.clone()) {
+      b.sign() != Ordering::Less
+    } else {
+      true
+    });
+    Self { a, b, c, L }
+  }
+}
+
+impl crate::Element for MalachiteElement {
+  fn is_identity(&self) -> subtle::Choice {
+    u8::from((self.a == Natural::ONE) && (self.b == Natural::ONE)).into()
+  }
+
+  // Algorithm 5.4.8 of A Course in Computational Algebraic Number Theory
+  fn double(&self) -> Self {
+    let L = &self.L;
+
+    let (d1, u, v) = self.b.clone().extended_gcd(&self.a);
+    let d1: Integer = d1.into();
+    debug_assert_eq!((&u * &self.b) + (&v * &self.a), d1);
+    let A = &self.a / &d1;
+    let B = &self.b / &d1;
+    let mut C = -((&self.c * &u) % &A);
+    let C1 = &A - &C;
+    if C1 < C {
+      C = -C1;
+    }
+
+    let (mut v, d, mut v2, v3, z) = parteucl(A.clone(), C, L);
+    if z == Natural::ZERO {
+      let g = ((&B * &v3) + &self.c) / &d;
+      let a2 = &d * &d;
+      let c2 = &v3 * &v3;
+      let b2_part = &d + &v3;
+      let b2 = &self.b + (&b2_part * &b2_part) - &a2 - &c2;
+      let c2 = &c2 + (&g * &d1);
+      return (MalachiteElement { a: a2, b: b2, c: c2, L: self.L.clone() }).reduce();
+    }
+
+    let e = ((&self.c * &v) + (&B * &d)) / &A;
+    let g = ((&e * &v2) - &B) / &v;
+    let mut b2 = (&e * &v2) + (&v * &g);
+    if d1 > Integer::ONE {
+      b2 = &d1 * &b2;
+      v = &d1 * &v;
+      v2 = &d1 * &v2;
+    }
+    let a2 = &d * &d;
+    let c2 = &v3 * &v3;
+    let b2_part = &d + &v3;
+    let b2 = &b2 + (&b2_part * &b2_part) - &a2 - &c2;
+    let a2 = &a2 + (&e * &v);
+    let c2 = &c2 + (&g * &v2);
+    (MalachiteElement { a: a2, b: b2, c: c2, L: self.L.clone() }).reduce()
+  }
+
+  // Algorithm 5.4.9 of A Course in Computational Algebraic Number Theory
+  fn add(&self, other: &Self) -> MalachiteElement {
+    if self.is_identity().into() {
+      return other.clone();
+    }
+    if other.is_identity().into() {
+      return self.clone();
+    }
+
+    let L = &self.L;
+
+    let (f1, f2) = if self.a < other.a { (other, self) } else { (self, other) };
+    let mut s = (&f1.b + &f2.b) >> 1u8;
+    let n = &f2.b - &s;
+
+    let (d, u, v) = f2.a.clone().extended_gcd(&f1.a);
+    let mut d: Integer = d.into();
+    debug_assert_eq!((&u * &f2.a) + (&v * &f1.a), d);
+
+    let mut a1 = f1.a.clone();
+    let mut a2 = f2.a.clone();
+
+    let (A, d1) = if d == Natural::ONE {
+      let A = -u * &n;
+      let d1 = d;
+      (A, d1)
+    } else if (&s % &d) == Natural::ZERO {
+      let A = -u * &n;
+      let d1 = d;
+      a1 /= &d1;
+      a2 /= &d1;
+      s /= &d1;
+      (A, d1)
+    } else {
+      let (d1, u1, _) = s.clone().extended_gcd(&d);
+      let d1: Integer = d1.into();
+      if d1 > Integer::ONE {
+        a1 /= &d1;
+        a2 /= &d1;
+        s /= &d1;
+        d /= &d1;
+      }
+
+      let l = (&u * (&f1.c % &d)) + (v * (&f2.c % &d));
+      let l = (&u1 * l) % &d;
+      let l = &d - l;
+      let A = (&l * (&a1 / &d)) - (u * (&n / &d));
+      (A, d1)
+    };
+
+    let mut A = A % &a1;
+    let A1 = &a1 - &A;
+    if A1 < A {
+      A = -A1;
+    }
+
+    let (mut v, d, mut v2, v3, z) = parteucl(a1.clone(), A, L);
+
+    if z == Natural::ZERO {
+      let Q1 = &a2 * &v3;
+      let Q2 = &Q1 + &n;
+      let f = &Q2 / &d;
+      let g = ((&v3 * &s) + &f2.c) / &d;
+      let a3 = &d * &a2;
+      let c3 = (&v3 * &f) + (&g * &d1);
+      let b3 = (Q1 << 1) + &f2.b;
+      return (MalachiteElement { a: a3, b: b3, c: c3, L: self.L.clone() }).reduce();
+    }
+
+    let b = ((&a2 * &d) + (&n * &v)) / &a1;
+    let Q1 = &b * &v3;
+    let Q2 = &Q1 + &n;
+    let f = &Q2 / &d;
+    let e = ((&s * &d) + (&f2.c * &v)) / &a1;
+    let Q3 = &e * &v2;
+    let Q4 = &Q3 - &s;
+    let g = &Q4 / &v;
+    if d1 > Integer::ONE {
+      v2 = &d1 * &v2;
+      v = &d1 * &v;
+    }
+
+    let a3 = (&d * &b) + (&e * &v);
+    let c3 = (&v3 * &f) + (&g * &v2);
+    let b3 = (&Q1 + &Q2) + (&d1 * (&Q3 + &Q4));
+    (MalachiteElement { a: a3, b: b3, c: c3, L: self.L.clone() }).reduce()
+  }
+
+  fn sub(&self, other: MalachiteElement) -> MalachiteElement {
+    self.add(&-other)
+  }
+
+  fn from_be_abc_tess_root_unchecked(
+    a: &[u8],
+    b_positive: subtle::Choice,
+    b: &[u8],
+    c: &[u8],
+    tess_root: &[u8],
+  ) -> Self {
+    let to_malachite = |value: &[u8]| Integer::from(natural_from_bytes(value));
+    let mut b = to_malachite(b);
+    if !bool::from(b_positive) {
+      b = -b;
+    }
+    Self { a: to_malachite(a), b, c: to_malachite(c), L: Arc::new(to_malachite(tess_root)) }
+  }
+
+  fn a(&self) -> Vec<u8> {
+    natural_to_bytes(self.a.unsigned_abs_ref())
+  }
+
+  fn b(&self) -> (subtle::Choice, Vec<u8>) {
+    (u8::from(self.b.sign() != Ordering::Less).into(), natural_to_bytes(self.b.unsigned_abs_ref()))
+  }
+}
+
+impl Neg for MalachiteElement {
+  type Output = Self;
+  fn neg(self) -> Self {
+    Self { a: self.a, b: -self.b, c: self.c, L: self.L.clone() }.reduce()
+  }
+}
