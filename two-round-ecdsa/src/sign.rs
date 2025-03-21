@@ -12,14 +12,14 @@ use class_groups::{Element, Table, ClassGroup};
 
 use dkg::Participant;
 
-use crate::{UnsignedInteger, EcdsaParameters, SetupView, Setup, proofs};
+use crate::{UnsignedInteger, Evrf, Parameters, SetupView, Setup};
 
 /// The 2-round signing protocol.
-pub struct SigningProtocol<P: EcdsaParameters, CG: Element>(PhantomData<(P, CG)>);
+pub struct SigningProtocol<P: Parameters, CG: Element>(PhantomData<(P, CG)>);
 
 /// A view of someone observing the signing protocol.
-pub struct Observing<P: EcdsaParameters, CG: Element> {
-  setup: Arc<SetupView<P::E, CG>>,
+pub struct Observing<P: Parameters, CG: Element> {
+  setup: Arc<SetupView<P, CG>>,
   session_id: [u8; 32],
   nonce_commitment: Option<P::E>,
   K_tilde: Option<(CG, CG)>,
@@ -30,31 +30,31 @@ pub struct Observing<P: EcdsaParameters, CG: Element> {
 }
 
 /// A view of someone participating in the signing protocol.
-pub struct Participating<P: EcdsaParameters, CG: Element> {
-  setup: Arc<Setup<P::E, CG>>,
+pub struct Participating<P: Parameters, CG: Element> {
+  setup: Arc<Setup<P, CG>>,
   alpha_i: Zeroizing<UnsignedInteger>,
   beta_i: Zeroizing<UnsignedInteger>,
-  u_i: Zeroizing<<P as EcdsaParameters>::F>,
+  u_i: Zeroizing<<P as Parameters>::F>,
   observing: Observing<P, CG>,
 }
 
 /// A view of the first round of the signing protocol.
-impl<P: EcdsaParameters, CG: Element> SigningProtocol<P, CG> {
+impl<P: Parameters, CG: Element> SigningProtocol<P, CG> {
   /// Participate in the 2-round signing protocol.
   ///
   /// Returns the participant's message and the view necessary to further participate.
   ///
-  /// `session_id` must be carefully chosen. The simplest choice is the hash of the signing set
-  /// and the message. This is a secure choice of `session_id`. Reuse of `session_id` across
-  /// signing sets/messages will leak the private key.
+  /// `session_id` must be carefully chosen. The simplest choice is the hash of the view of the
+  /// setup, the signing set, and the message. This is a secure choice of `session_id`. Reuse of
+  /// `session_id` across setups/signing sets/messages will leak the private key.
   ///
   /// If delayed specification of signing set is desired, then `session_id` should be some
-  /// derivative of `(message, attempt number)` where only a single signing set will be specified
-  /// and moved forward with per attempt.
+  /// derivative of `(setup view, message, attempt number)` where only a single signing set will be
+  /// specified and moved forward with per attempt.
   ///
   /// If delayed specification of the message is desired (and optionally also the signing set),
-  /// then this should be some derivative of a global index where each index will only be used for
-  /// a single message (and signing set).
+  /// then this should be some derivative of a global index for the setup where each index will
+  /// only be used for a single message (and signing set).
   ///
   /// Delayed specification of the signing set/message was not proven secure in the paper.
   /// Post-specification of the signing set allows an adversary to bias the nonce via choice of
@@ -68,17 +68,19 @@ impl<P: EcdsaParameters, CG: Element> SigningProtocol<P, CG> {
   ///
   /// This code defers the derivation of session ID, and specification timeline, to the caller in
   /// order to enable these features if proven secure. The caller is trusted with the important,
-  /// critical, and difficult responsibility of handling this securely.
+  /// critical, and difficult responsibility of handling this securely. The only endorsed solution
+  /// is the hash of the view of the setup, the signing set, and the message.
   #[must_use]
   pub fn participate(
     rng: &mut (impl RngCore + CryptoRng),
-    setup: Arc<Setup<P::E, CG>>,
+    setup: Arc<Setup<P, CG>>,
     session_id: [u8; 32],
   ) -> (Participating<P, CG>, Vec<u8>) {
     let mut message = Vec::with_capacity(32 + 768 + (3 * 384));
 
     let (alpha_i, beta_i, u_i) = {
-      let nonce_i = proofs::Evrf::<P::E>::prove(&mut *rng, session_id, &mut message).unwrap();
+      let nonce_i =
+        P::Evrf::prove(&mut *rng, setup.evrf_setup(), session_id, &mut message).unwrap();
 
       let alpha_i = Zeroizing::new(UnsignedInteger::random(
         setup.view().class_group().unknown_order_bound() + 128,
@@ -98,7 +100,7 @@ impl<P: EcdsaParameters, CG: Element> SigningProtocol<P, CG> {
         &mut *rng,
       ));
       let beta_i_bytes = Zeroizing::new(beta_i.to_be_bytes());
-      let u_i = Zeroizing::new(<P as EcdsaParameters>::F::random(&mut *rng));
+      let u_i = Zeroizing::new(<P as Parameters>::F::random(&mut *rng));
       let U_i = CG::mul(setup.view().G(), &beta_i_bytes)
         .add(&CG::mul(setup.view().Y(), &Zeroizing::new(crate::be_bytes(u_i.deref()))));
 
@@ -125,7 +127,7 @@ impl<P: EcdsaParameters, CG: Element> SigningProtocol<P, CG> {
   }
   /// Observe the execution of the 2-round signing protocol.
   #[must_use]
-  pub fn observe(setup: Arc<SetupView<P::E, CG>>, session_id: [u8; 32]) -> Observing<P, CG> {
+  pub fn observe(setup: Arc<SetupView<P, CG>>, session_id: [u8; 32]) -> Observing<P, CG> {
     Observing {
       setup,
       session_id,
@@ -161,8 +163,8 @@ pub enum Ready<NotReady, Ready> {
 /// The view of someone who has observed the first round and can observe signature shares once the
 /// message is specified.
 // "signature shares" is loosely defined here as the round two messages.
-pub struct ObservingSigning<P: EcdsaParameters, CG: Element> {
-  setup: Arc<SetupView<P::E, CG>>,
+pub struct ObservingSigning<P: Parameters, CG: Element> {
+  setup: Arc<SetupView<P, CG>>,
   nonce_commitment: P::E,
   K_tilde: (CG, CG),
   U: CG,
@@ -171,15 +173,15 @@ pub struct ObservingSigning<P: EcdsaParameters, CG: Element> {
 }
 
 /// The view of someone who has observed the first round and can now produce a signature share.
-pub struct Signing<P: EcdsaParameters, CG: Element> {
-  setup: Arc<Setup<P::E, CG>>,
+pub struct Signing<P: Parameters, CG: Element> {
+  setup: Arc<Setup<P, CG>>,
   alpha_i: Zeroizing<UnsignedInteger>,
   beta_i: Zeroizing<UnsignedInteger>,
-  u_i: Zeroizing<<P as EcdsaParameters>::F>,
+  u_i: Zeroizing<<P as Parameters>::F>,
   observing_signing: ObservingSigning<P, CG>,
 }
 
-impl<P: EcdsaParameters, CG: Element> Observing<P, CG> {
+impl<P: Parameters, CG: Element> Observing<P, CG> {
   /// Accumulate a message from a participant.
   ///
   /// Please see `Participating::accumulate` for more information. This method matches its
@@ -205,27 +207,54 @@ impl<P: EcdsaParameters, CG: Element> Observing<P, CG> {
 
     // If we're now at the threshold, batch verify the pending messages and move them to
     // accumulated
-    let mut faulty = vec![];
+    let mut faulty = HashSet::new();
     if (self.accumulated.len() + self.pending.len()) == usize::from(self.setup.t()) {
+      let mut messages = HashMap::with_capacity(self.pending.len());
+
+      // Prepare the batch verifications
+      let mut evrf_batch_verifier = P::Evrf::batch_verifier();
       for (participant, message) in self.pending.drain() {
         let mut message = message.as_slice();
-        let Ok(nonce_commitment) = proofs::Evrf::<P::E>::verify(self.session_id, &mut message)
-        else {
-          faulty.push(participant);
+        let Ok(nonce_commitment) = P::Evrf::queue_verification(
+          &mut evrf_batch_verifier,
+          participant,
+          self.setup.evrf_setup(&participant).unwrap(),
+          self.session_id,
+          &mut message,
+        ) else {
+          faulty.insert(participant);
           continue;
         };
         let Ok(K_tilde_i_0) = self.setup.class_group().decompress_p(&mut message) else {
-          faulty.push(participant);
+          faulty.insert(participant);
           continue;
         };
         let Ok(K_tilde_i_1) = self.setup.class_group().decompress_p(&mut message) else {
-          faulty.push(participant);
+          faulty.insert(participant);
           continue;
         };
         let Ok(U_i) = self.setup.class_group().decompress_p(&mut message) else {
-          faulty.push(participant);
+          faulty.insert(participant);
           continue;
         };
+        messages.insert(participant, (nonce_commitment, K_tilde_i_0, K_tilde_i_1, U_i));
+      }
+
+      // Perform the batch verifications
+      match P::Evrf::verify(evrf_batch_verifier) {
+        Ok(()) => {}
+        Err(faults) => {
+          for fault in faults {
+            faulty.insert(fault);
+          }
+        }
+      }
+
+      // Move forward with the valid messages
+      for (participant, (nonce_commitment, K_tilde_i_0, K_tilde_i_1, U_i)) in messages {
+        if faulty.contains(&participant) {
+          continue;
+        }
 
         self.nonce_commitment = self
           .nonce_commitment
@@ -239,6 +268,8 @@ impl<P: EcdsaParameters, CG: Element> Observing<P, CG> {
         self.accumulated.insert(participant);
       }
     }
+
+    // Fold the faulty participants from this verification run into our state
     for faulty in &faulty {
       self.faulty.insert(*faulty);
     }
@@ -262,12 +293,16 @@ impl<P: EcdsaParameters, CG: Element> Observing<P, CG> {
 
     Ready::NotReady((
       self,
-      if faulty.is_empty() { None } else { Some(RoundOneError::Faults(faulty)) },
+      if faulty.is_empty() {
+        None
+      } else {
+        Some(RoundOneError::Faults(faulty.into_iter().collect()))
+      },
     ))
   }
 }
 
-impl<P: EcdsaParameters, CG: Element> Participating<P, CG> {
+impl<P: Parameters, CG: Element> Participating<P, CG> {
   /// Accumulate a message from a participant.
   ///
   /// This message is expected to be authenticated as originating from the sender by the caller.
@@ -302,10 +337,10 @@ impl<P: EcdsaParameters, CG: Element> Participating<P, CG> {
 }
 
 /// The view of someone aggregating signature shares to obtain the resulting signature.
-pub struct Aggregating<P: EcdsaParameters, CG: Element> {
+pub struct Aggregating<P: Parameters, CG: Element> {
   observing_signing: ObservingSigning<P, CG>,
-  x_coordinate: <P as EcdsaParameters>::F,
-  message_hash: <P as EcdsaParameters>::F,
+  x_coordinate: <P as Parameters>::F,
+  message_hash: <P as Parameters>::F,
   Z_tilde: (CG, CG),
 
   accumulated: HashSet<Participant>,
@@ -316,7 +351,7 @@ pub struct Aggregating<P: EcdsaParameters, CG: Element> {
   KU: Option<CG>,
 }
 
-impl<P: EcdsaParameters, CG: Element> ObservingSigning<P, CG> {
+impl<P: Parameters, CG: Element> ObservingSigning<P, CG> {
   /// Observe the signing of the following message.
   #[must_use]
   pub fn message(self, message: &[u8]) -> Aggregating<P, CG> {
@@ -344,7 +379,7 @@ impl<P: EcdsaParameters, CG: Element> ObservingSigning<P, CG> {
     let r_C_tilde = (
       CG::mul(
         &Table::new_for_scalar_bits(
-          <P as EcdsaParameters>::F::NUM_BITS.try_into().unwrap(),
+          <P as Parameters>::F::NUM_BITS.try_into().unwrap(),
           self.setup.class_group().identity_p().clone(),
           C_tilde.0,
         ),
@@ -356,7 +391,7 @@ impl<P: EcdsaParameters, CG: Element> ObservingSigning<P, CG> {
       // any scaling of a class-group element
       CG::mul(
         &Table::new_for_scalar_bits(
-          <P as EcdsaParameters>::F::NUM_BITS.try_into().unwrap(),
+          <P as Parameters>::F::NUM_BITS.try_into().unwrap(),
           self.setup.class_group().identity_p().clone(),
           C_tilde.1,
         ),
@@ -382,7 +417,7 @@ impl<P: EcdsaParameters, CG: Element> ObservingSigning<P, CG> {
   }
 }
 
-impl<P: EcdsaParameters, CG: Element> Signing<P, CG> {
+impl<P: Parameters, CG: Element> Signing<P, CG> {
   /// Participate in signing the following message.
   ///
   /// Returns the participant's message and the view necessary to obtain the resulting signature.
@@ -393,13 +428,13 @@ impl<P: EcdsaParameters, CG: Element> Signing<P, CG> {
   pub fn sign(self, message: &[u8]) -> (Aggregating<P, CG>, Vec<u8>) {
     let mut aggregating = self.observing_signing.message(message);
 
-    fn scaled_decryption<P: EcdsaParameters, CG: Element>(
+    fn scaled_decryption<P: Parameters, CG: Element>(
       class_group: &ClassGroup<CG>,
       A_tilde: (CG, CG),
       B: CG,
       alpha_i: &UnsignedInteger,
       beta_i: &UnsignedInteger,
-      b_i: &<P as EcdsaParameters>::F,
+      b_i: &<P as Parameters>::F,
     ) -> CG {
       // TODO: Cache/reuse these tables
       let A_tilde_0 = Table::new_for_scalar_bits(
@@ -408,7 +443,7 @@ impl<P: EcdsaParameters, CG: Element> Signing<P, CG> {
         A_tilde.0,
       );
       let A_tilde_1 = Table::new_for_scalar_bits(
-        <P as EcdsaParameters>::F::NUM_BITS.try_into().unwrap(),
+        <P as Parameters>::F::NUM_BITS.try_into().unwrap(),
         class_group.identity_p().clone(),
         A_tilde.1,
       );
@@ -496,7 +531,7 @@ impl<F: PrimeFieldBits> Signature<F> {
   }
 }
 
-impl<P: EcdsaParameters, CG: Element> Aggregating<P, CG> {
+impl<P: Parameters, CG: Element> Aggregating<P, CG> {
   /// Aggregate a signature share from a participant.
   ///
   /// This message is expected to be authenticated as originating from the sender by the caller.
@@ -510,7 +545,7 @@ impl<P: EcdsaParameters, CG: Element> Aggregating<P, CG> {
     mut self,
     participant: Participant,
     message: Vec<u8>,
-  ) -> Ready<(Self, Option<RoundTwoError>), Signature<<P as EcdsaParameters>::F>> {
+  ) -> Ready<(Self, Option<RoundTwoError>), Signature<<P as Parameters>::F>> {
     // Verify they haven't already participated
     if self.accumulated.contains(&participant) ||
       self.faulty.contains(&participant) ||

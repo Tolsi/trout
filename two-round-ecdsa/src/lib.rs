@@ -10,7 +10,8 @@ use group::{ff::PrimeFieldBits, prime::PrimeGroup};
 mod integer;
 pub use integer::UnsignedInteger;
 
-pub(crate) mod proofs;
+mod proofs;
+pub use proofs::*;
 
 mod key_gen;
 pub use key_gen::*;
@@ -29,11 +30,15 @@ pub(crate) fn be_bytes<F: PrimeFieldBits>(scalar: &F) -> Vec<u8> {
 }
 
 /// ECDSA parameters.
-pub trait EcdsaParameters {
+pub trait Parameters {
   /// The elliptic curve.
   type E: PrimeGroup<Scalar = Self::F>;
   /// The scalar field of the elliptic curve.
   type F: Zeroize + PrimeFieldBits;
+
+  /// The eVRF to use.
+  type Evrf: Evrf<Self::E>;
+
   /// Hash the message and reduce it into a scalar.
   fn hash_message(message: &[u8]) -> Self::F;
   /// Reduce the `x`-coordinate of a point into a scalar.
@@ -44,9 +49,13 @@ pub trait EcdsaParameters {
 #[cfg(feature = "secp256k1")]
 pub struct Secp256k1;
 #[cfg(feature = "secp256k1")]
-impl EcdsaParameters for Secp256k1 {
+impl Parameters for Secp256k1 {
   type E = k256::ProjectivePoint;
   type F = k256::Scalar;
+
+  // TODO: Use a secure eVRF
+  type Evrf = DummyEvrf;
+
   fn hash_message(message: &[u8]) -> Self::F {
     use sha2::{Digest, Sha256};
     use k256::elliptic_curve::ops::Reduce;

@@ -5,7 +5,7 @@ use two_round_ecdsa::{SecurityLevel, Setup, SigningProtocol, Ready};
 
 #[test]
 fn sign() {
-  let mut setups = Setup::<k256::ProjectivePoint, MalachiteElement>::dealer(
+  let mut setups = Setup::<two_round_ecdsa::Secp256k1, MalachiteElement>::dealer(
     &mut OsRng,
     SecurityLevel::Insecure,
     2,
@@ -39,14 +39,21 @@ fn sign() {
   assert_eq!(first_signature, second_signature);
   println!("Aggregated!");
 
-  use ecdsa::signature::Verifier;
-  ecdsa::VerifyingKey::<k256::Secp256k1>::from_affine(
-    setups.values().next().unwrap().view().verification_key().to_affine(),
-  )
-  .unwrap()
-  .verify(
-    MESSAGE,
-    &ecdsa::Signature::from_scalars(first_signature.r(), first_signature.s()).unwrap(),
-  )
-  .unwrap();
+  {
+    use ecdsa::signature::Verifier;
+    ecdsa::VerifyingKey::<k256::Secp256k1>::from_affine(
+      setups.values().next().unwrap().view().verification_key().to_affine(),
+    )
+    .unwrap()
+    .verify(
+      MESSAGE,
+      &ecdsa::Signature::from_scalars(first_signature.r(), {
+        // Use a normalized `s` since the ECDSA crate rejects non-normalized signature
+        let s = first_signature.s();
+        if bool::from(k256::elliptic_curve::scalar::IsHigh::is_high(&s)) { -s } else { s }
+      })
+      .unwrap(),
+    )
+    .unwrap();
+  }
 }

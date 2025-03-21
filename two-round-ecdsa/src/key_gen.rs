@@ -5,14 +5,14 @@ use rand_core::{RngCore, CryptoRng, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 
 use group::{
-  ff::{Field, PrimeField, PrimeFieldBits},
-  prime::PrimeGroup,
+  ff::{Field, PrimeField},
+  Group,
 };
 use class_groups::{Element, Table, ClassGroup};
 
 use dkg::Participant;
 
-use crate::UnsignedInteger;
+use crate::{UnsignedInteger, Evrf, Parameters};
 
 /// The security level to target with the setup.
 ///
@@ -37,18 +37,19 @@ pub enum SecurityLevel {
 
 /// A view of the setup for a multisig.
 #[derive(Clone)]
-pub struct SetupView<E: PrimeGroup, CG: Element> {
+pub struct SetupView<P: Parameters, CG: Element> {
   t: u16,
   class_group_seed: [u8; 32],
   class_group: ClassGroup<CG>,
   G: Table<CG>,
   Y: Table<CG>,
-  verification_key: E,
-  // verification_shares: HashMap<Participant, E>,
+  verification_key: P::E,
+  // verification_shares: HashMap<Participant, P::E>,
+  evrf_setups: HashMap<Participant, <P::Evrf as Evrf<P::E>>::SetupView>,
   share_ciphertexts: HashMap<Participant, (Table<CG>, Table<CG>)>,
 }
 
-impl<E: PrimeGroup, CG: Element> SetupView<E, CG> {
+impl<P: Parameters, CG: Element> SetupView<P, CG> {
   pub(crate) fn t(&self) -> u16 {
     self.t
   }
@@ -65,8 +66,14 @@ impl<E: PrimeGroup, CG: Element> SetupView<E, CG> {
     &self.Y
   }
   /// The ECDSA verification key.
-  pub fn verification_key(&self) -> E {
+  pub fn verification_key(&self) -> P::E {
     self.verification_key
+  }
+  pub(crate) fn evrf_setup(
+    &self,
+    participant: &Participant,
+  ) -> Option<&<P::Evrf as Evrf<P::E>>::SetupView> {
+    self.evrf_setups.get(participant)
   }
   pub(crate) fn share_ciphertext(
     &self,
@@ -77,13 +84,14 @@ impl<E: PrimeGroup, CG: Element> SetupView<E, CG> {
 }
 
 /// The result of the setup for a participant.
-pub struct Setup<E: PrimeGroup<Scalar: Zeroize + PrimeFieldBits>, CG: Element> {
-  view: Arc<SetupView<E, CG>>,
+pub struct Setup<P: Parameters, CG: Element> {
+  view: Arc<SetupView<P, CG>>,
   i: Participant,
-  share_ciphertext_opening: Zeroizing<(UnsignedInteger, E::Scalar)>,
+  evrf_setup: <P::Evrf as Evrf<P::E>>::Setup,
+  share_ciphertext_opening: Zeroizing<(UnsignedInteger, P::F)>,
 }
 
-fn class_group<E: PrimeGroup<Scalar: Zeroize + PrimeFieldBits>, CG: Element>(
+fn class_group<P: Parameters, CG: Element>(
   seed: [u8; 32],
   security_level: SecurityLevel,
 ) -> (ClassGroup<CG>, Table<CG>, Table<CG>) {
@@ -100,12 +108,12 @@ fn class_group<E: PrimeGroup<Scalar: Zeroize + PrimeFieldBits>, CG: Element>(
   };
 
   let p_bytes = {
-    let mut p_bytes = crate::be_bytes(&-E::Scalar::ONE);
+    let mut p_bytes = crate::be_bytes(&-P::F::ONE);
     // `p_bytes` has `p - 1` where `p` is prime, so set back the last bit
     const {
       // Handle the edge case of 2 which isn't supported by our class group construction and adding
       // 1 is not the following binary OR operation
-      assert!(E::Scalar::NUM_BITS > 1, "prime order was <= 2 when an odd prime is required");
+      assert!(P::F::NUM_BITS > 1, "prime order was <= 2 when an odd prime is required");
     }
     *p_bytes.last_mut().unwrap() |= 1;
     p_bytes
@@ -119,15 +127,20 @@ fn class_group<E: PrimeGroup<Scalar: Zeroize + PrimeFieldBits>, CG: Element>(
   (class_group, G, Y)
 }
 
-impl<E: PrimeGroup<Scalar: Zeroize + PrimeFieldBits>, CG: Element> Setup<E, CG> {
+impl<P: Parameters, CG: Element> Setup<P, CG> {
   /// The public view of the setup.
-  pub fn view(&self) -> &Arc<SetupView<E, CG>> {
+  pub fn view(&self) -> &Arc<SetupView<P, CG>> {
     &self.view
   }
 
   /// Our participant index.
   pub(crate) fn i(&self) -> Participant {
     self.i
+  }
+
+  /// Our eVRF setup.
+  pub(crate) fn evrf_setup(&self) -> &<P::Evrf as Evrf<P::E>>::Setup {
+    &self.evrf_setup
   }
 
   /// The opening of our share's ciphertext.
@@ -147,7 +160,7 @@ impl<E: PrimeGroup<Scalar: Zeroize + PrimeFieldBits>, CG: Element> Setup<E, CG> 
     security_level: SecurityLevel,
     t: u16,
     n: u16,
-  ) -> Option<HashMap<Participant, Arc<Setup<E, CG>>>> {
+  ) -> Option<HashMap<Participant, Arc<Setup<P, CG>>>> {
     {
       let valid_t_n = (t <= n) && (1 < t);
       if !valid_t_n {
@@ -157,20 +170,26 @@ impl<E: PrimeGroup<Scalar: Zeroize + PrimeFieldBits>, CG: Element> Setup<E, CG> 
 
     let mut class_group_seed = [0; 32];
     rng.fill_bytes(&mut class_group_seed);
-    let (class_group, G, Y) = class_group::<E, CG>(class_group_seed, security_level);
+    let (class_group, G, Y) = class_group::<P, CG>(class_group_seed, security_level);
 
     // Generate `t` coefficients
-    let mut coeffs = Zeroizing::new(vec![E::Scalar::ZERO; usize::from(t)]);
+    let mut coeffs = Zeroizing::new(vec![P::F::ZERO; usize::from(t)]);
     for coeff in coeffs.as_mut_slice() {
-      *coeff = E::Scalar::random(&mut *rng);
+      *coeff = P::F::random(&mut *rng);
     }
 
     // Set the verification key
-    let verification_key = E::generator() * coeffs[0];
+    let verification_key = P::E::generator() * coeffs[0];
 
-    // Create the shares for each participant
+    let mut evrf_setup_views = HashMap::new();
+    let mut evrf_setups = HashMap::new();
     let mut share_ciphertext_openings = HashMap::new();
     for participant in (1 ..= n).map(|i| Participant::new(i).unwrap()) {
+      let (setup_view, setup) = P::Evrf::setup(&mut *rng);
+      evrf_setup_views.insert(participant, setup_view);
+      evrf_setups.insert(participant, setup);
+
+      // Create the shares for each participant
       fn polynomial<F: PrimeField + Zeroize>(coefficients: &[F], l: Participant) -> Zeroizing<F> {
         let l = F::from(u64::from(u16::from(l)));
         // This should never be reached since Participant is explicitly non-zero
@@ -222,6 +241,7 @@ impl<E: PrimeGroup<Scalar: Zeroize + PrimeFieldBits>, CG: Element> Setup<E, CG> 
       G,
       Y,
       verification_key,
+      evrf_setups: evrf_setup_views,
       share_ciphertexts,
     });
 
@@ -233,6 +253,7 @@ impl<E: PrimeGroup<Scalar: Zeroize + PrimeFieldBits>, CG: Element> Setup<E, CG> 
         Arc::new(Setup {
           view: view.clone(),
           i,
+          evrf_setup: evrf_setups.remove(&i).unwrap(),
           share_ciphertext_opening: share_ciphertext_openings.remove(&i).unwrap(),
         }),
       );
