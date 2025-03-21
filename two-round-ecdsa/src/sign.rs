@@ -16,7 +16,7 @@ use class_groups::{Element, Table, ClassGroup};
 
 use dkg::Participant;
 
-use crate::{UnsignedInteger, Evrf, RoundTwoProofs, Parameters, SetupView, Setup};
+use crate::{UnsignedInteger, Evrf, RoundOneProofs, RoundTwoProofs, Parameters, SetupView, Setup};
 
 /*
   Reader/Writer which transcripts what they read/write. The Reader avoids the read, decompress,
@@ -174,7 +174,7 @@ impl<CG: Element, P: Parameters<CG>> SigningProtocol<CG, P> {
     let (alpha_i, beta_i, u_i) = {
       let mut message = DigestWriter(observing.transcript.clone(), &mut message);
 
-      let alpha_i = {
+      let (alpha_i, nonce_i) = {
         // Sample the nonce
         let evrf_context = context(&mut message.0);
         let nonce_i =
@@ -198,7 +198,7 @@ impl<CG: Element, P: Parameters<CG>> SigningProtocol<CG, P> {
         K_tilde_i.0.compress(&mut message).unwrap();
         K_tilde_i.1.compress(&mut message).unwrap();
 
-        alpha_i
+        (alpha_i, nonce_i)
       };
 
       let (beta_i, u_i) = {
@@ -219,6 +219,21 @@ impl<CG: Element, P: Parameters<CG>> SigningProtocol<CG, P> {
 
         (beta_i, u_i)
       };
+
+      let round_one_context = context(&mut message.0);
+      P::RoundOneProofs::prove(
+        &mut *rng,
+        round_one_context,
+        setup.view().G(),
+        setup.view().Y(),
+        setup.view().class_group().f(),
+        &alpha_i,
+        &nonce_i,
+        &beta_i,
+        &u_i,
+        &mut message,
+      )
+      .unwrap();
 
       (alpha_i, beta_i, u_i)
     };
@@ -323,6 +338,7 @@ impl<CG: Element, P: Parameters<CG>> Observing<CG, P> {
 
       // Prepare the batch verifications
       let mut evrf_batch_verifier = P::Evrf::batch_verifier();
+      let mut round_one_batch_verifier = P::RoundOneProofs::batch_verifier();
       for (participant, message) in self.pending.drain() {
         let message = message.as_slice();
         let mut message = DigestReader(self.transcript.clone(), message);
@@ -338,6 +354,7 @@ impl<CG: Element, P: Parameters<CG>> Observing<CG, P> {
           faulty.insert(participant);
           continue;
         };
+
         let Ok(K_tilde_i_0) = self.setup.class_group().decompress_p(&mut message) else {
           faulty.insert(participant);
           continue;
@@ -346,15 +363,42 @@ impl<CG: Element, P: Parameters<CG>> Observing<CG, P> {
           faulty.insert(participant);
           continue;
         };
+        let K_tilde_i = (K_tilde_i_0, K_tilde_i_1);
         let Ok(U_i) = self.setup.class_group().decompress_p(&mut message) else {
           faulty.insert(participant);
           continue;
         };
-        messages.insert(participant, (message.0, R_i, (K_tilde_i_0, K_tilde_i_1), U_i));
+
+        let round_one_context = context(&mut message.0);
+        let Ok(()) = P::RoundOneProofs::queue_verification(
+          &mut round_one_batch_verifier,
+          participant,
+          round_one_context,
+          self.setup.G(),
+          self.setup.Y(),
+          self.setup.class_group().f(),
+          R_i,
+          &K_tilde_i,
+          &U_i,
+          &mut message,
+        ) else {
+          faulty.insert(participant);
+          continue;
+        };
+
+        messages.insert(participant, (message.0, R_i, K_tilde_i, U_i));
       }
 
       // Perform the batch verifications
       match P::Evrf::verify(evrf_batch_verifier) {
+        Ok(()) => {}
+        Err(faults) => {
+          for fault in faults {
+            faulty.insert(fault);
+          }
+        }
+      }
+      match P::RoundOneProofs::verify(round_one_batch_verifier) {
         Ok(()) => {}
         Err(faults) => {
           for fault in faults {

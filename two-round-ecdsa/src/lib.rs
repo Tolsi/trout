@@ -41,6 +41,8 @@ pub trait Parameters<CG: Element> {
 
   /// The eVRF to use.
   type Evrf: Evrf<Self::E>;
+  /// The round one proofs.
+  type RoundOneProofs: RoundOneProofs<Self::E, CG>;
   /// The round two proofs.
   type RoundTwoProofs: RoundTwoProofs<Self::E, CG>;
 
@@ -58,8 +60,9 @@ impl<CG: Element> Parameters<CG> for Secp256k1<CG> {
   type E = k256::ProjectivePoint;
   type F = k256::Scalar;
 
-  // TODO: Use a secure eVRF
+  // TODO: Use proper proofs
   type Evrf = DummyEvrf;
+  type RoundOneProofs = InsecureRoundOneProofs;
   type RoundTwoProofs = NoIdentifiableAborts;
 
   fn hash_message(message: &[u8]) -> Self::F {

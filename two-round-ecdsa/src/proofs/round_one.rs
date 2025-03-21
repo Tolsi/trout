@@ -61,10 +61,57 @@ pub trait RoundOneProofs<E: PrimeGroup, CG: Element> {
     K_tilde_i: &(CG, CG),
     U_i: &CG,
     proof: impl io::Read,
-  ) -> io::Result<E>;
+  ) -> io::Result<()>;
 
   /// Verify all proofs within the batch verifier.
   ///
   /// Returns `Ok(())` or a list of *all* of the *faulty* participants.
   fn verify(batch_verifier: Self::BatchVerifier) -> Result<(), Vec<dkg::Participant>>;
+}
+
+/// No proofs for round one.
+///
+/// This is fundamentally insecure and will let any participant recover the private key.
+pub struct InsecureRoundOneProofs;
+
+impl<E: PrimeGroup, CG: Element> RoundOneProofs<E, CG> for InsecureRoundOneProofs {
+  type BatchVerifier = ();
+
+  fn prove(
+    _rng: &mut (impl RngCore + CryptoRng),
+    _context: [u8; 32],
+    _G: &Table<CG>,
+    _Y: &Table<CG>,
+    _H: &Table<CG>,
+    _alpha_i: &UnsignedInteger,
+    _nonce_i: &E::Scalar,
+    _beta_i: &UnsignedInteger,
+    _u_i: &E::Scalar,
+    _proof: impl io::Write,
+  ) -> io::Result<()> {
+    Ok(())
+  }
+
+  fn batch_verifier() -> Self::BatchVerifier {
+    ()
+  }
+
+  fn queue_verification(
+    _batch_verifier: &mut Self::BatchVerifier,
+    _participant: dkg::Participant,
+    _context: [u8; 32],
+    _G: &Table<CG>,
+    _Y: &Table<CG>,
+    _H: &Table<CG>,
+    _R_i: E,
+    _K_tilde_i: &(CG, CG),
+    _U_i: &CG,
+    _proof: impl io::Read,
+  ) -> io::Result<()> {
+    Ok(())
+  }
+
+  fn verify(_batch_verifier: Self::BatchVerifier) -> Result<(), Vec<dkg::Participant>> {
+    Ok(())
+  }
 }
