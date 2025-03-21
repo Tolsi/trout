@@ -1,60 +1,149 @@
 use core::{marker::PhantomData, ops::Deref};
 use std::{
   sync::Arc,
+  io,
   collections::{HashSet, HashMap},
 };
 
 use zeroize::Zeroizing;
 use rand_core::{RngCore, CryptoRng};
 
-use group::ff::{Field, PrimeField, PrimeFieldBits};
+use group::{
+  ff::{Field, PrimeField, PrimeFieldBits},
+  Group,
+};
 use class_groups::{Element, Table, ClassGroup};
 
 use dkg::Participant;
 
-use crate::{UnsignedInteger, Evrf, Parameters, SetupView, Setup};
+use crate::{UnsignedInteger, Evrf, RoundTwoProofs, Parameters, SetupView, Setup};
+
+/*
+  Reader/Writer which transcripts what they read/write. The Reader avoids the read, decompress,
+  compress, hash flow solely read, hash, decompress. Since compressions can be expensive, this
+  is greatly appreciated, while the pattern also ensures our transcript is complete.
+*/
+struct DigestReader<R: io::Read>(blake3::Hasher, R);
+impl<R: io::Read> io::Read for DigestReader<R> {
+  fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+    let read_bytes = self.1.read(buf)?;
+    if read_bytes > buf.len() {
+      Err(io::Error::other("more bytes read than size of buffer"))?;
+    }
+    self.0.update(&buf[.. read_bytes]);
+    Ok(read_bytes)
+  }
+}
+struct DigestWriter<W: io::Write>(blake3::Hasher, W);
+impl<W: io::Write> io::Write for DigestWriter<W> {
+  fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+    self.0.update(buf);
+    self.1.write(buf)
+  }
+  fn flush(&mut self) -> io::Result<()> {
+    self.1.flush()
+  }
+}
+
+// Sample a context hash.
+fn context(hasher: &mut blake3::Hasher) -> [u8; 32] {
+  let hash = hasher.finalize();
+  // Advance the hasher so future samples are distinct
+  hasher.update(&[0]);
+  hash.into()
+}
+
+/// Table a ciphertext for scaled decryption.
+///
+/// This just yields the presumably-optimal table sizes.
+fn table_scaled_decryption_ciphertext<CG: Element, P: Parameters<CG>>(
+  class_group: &ClassGroup<CG>,
+  ciphertext: (CG, CG),
+) -> (Table<CG>, Table<CG>) {
+  (
+    Table::new_for_scalar_bits(
+      // We `2 *` the bits as we do one scaling for the protocol itself and the proofs presumably
+      // also do one
+      2 * usize::try_from(class_group.unknown_order_bound() + 128).unwrap(),
+      class_group.identity_p().clone(),
+      ciphertext.0,
+    ),
+    Table::new_for_scalar_bits(
+      // The protocol scales by an elliptic curve scalar yet the proofs presumably scale by a
+      // uniform-to-the-class-group scalar
+      usize::try_from(<P as Parameters<CG>>::F::NUM_BITS).unwrap() +
+        usize::try_from(class_group.unknown_order_bound() + 128).unwrap(),
+      class_group.identity_p().clone(),
+      ciphertext.1,
+    ),
+  )
+}
 
 /// The 2-round signing protocol.
-pub struct SigningProtocol<P: Parameters, CG: Element>(PhantomData<(P, CG)>);
+pub struct SigningProtocol<CG: Element, P: Parameters<CG>>(PhantomData<(CG, P)>);
 
 /// A view of someone observing the signing protocol.
-pub struct Observing<P: Parameters, CG: Element> {
-  setup: Arc<SetupView<P, CG>>,
-  session_id: [u8; 32],
-  nonce_commitment: Option<P::E>,
-  K_tilde: Option<(CG, CG)>,
-  U: Option<CG>,
-  accumulated: HashSet<Participant>,
+pub struct Observing<CG: Element, P: Parameters<CG>> {
+  setup: Arc<SetupView<CG, P>>,
+  transcript: blake3::Hasher,
+  accumulated: HashMap<Participant, (blake3::Hasher, P::E, (CG, CG), CG)>,
   faulty: HashSet<Participant>,
   pending: HashMap<Participant, Vec<u8>>,
 }
 
 /// A view of someone participating in the signing protocol.
-pub struct Participating<P: Parameters, CG: Element> {
-  setup: Arc<Setup<P, CG>>,
+pub struct Participating<CG: Element, P: Parameters<CG>> {
+  setup: Arc<Setup<CG, P>>,
   alpha_i: Zeroizing<UnsignedInteger>,
   beta_i: Zeroizing<UnsignedInteger>,
-  u_i: Zeroizing<<P as Parameters>::F>,
-  observing: Observing<P, CG>,
+  u_i: Zeroizing<<P as Parameters<CG>>::F>,
+  observing: Observing<CG, P>,
 }
 
 /// A view of the first round of the signing protocol.
-impl<P: Parameters, CG: Element> SigningProtocol<P, CG> {
+impl<CG: Element, P: Parameters<CG>> SigningProtocol<CG, P> {
+  /// The recommended `session_id` structure.
+  ///
+  /// Alternative `session_id`s may or may not be secure but no others are recommended/endorsed.
+  /// Please see `SigningProtocol::participate`'s documentation.
+  ///
+  /// The caller is expected to enforce that only this signing set has its messages passed to
+  /// `ObservingSigning::accumulate`/`Signing::accumulate`.
+  pub fn recommended_session_id(participants: &HashSet<Participant>, message: &[u8]) -> [u8; 32] {
+    let mut participants = participants.iter().copied().collect::<Vec<_>>();
+    participants.sort();
+
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(
+      &u16::try_from(participants.len())
+        .expect("Participant only has 2**16-1 values yet set size exceeded 2**16-1")
+        .to_le_bytes(),
+    );
+    for participant in participants {
+      hasher.update(&u16::from(participant).to_le_bytes());
+    }
+    // This is variable length yet we immediately draw a digest after, so there's nothing to
+    // malleate it with
+    hasher.update(message);
+    hasher.finalize().into()
+  }
+
   /// Participate in the 2-round signing protocol.
   ///
   /// Returns the participant's message and the view necessary to further participate.
   ///
-  /// `session_id` must be carefully chosen. The simplest choice is the hash of the view of the
-  /// setup, the signing set, and the message. This is a secure choice of `session_id`. Reuse of
-  /// `session_id` across setups/signing sets/messages will leak the private key.
+  /// `session_id` must be carefully chosen. The simplest choice is the signing set and the
+  /// message. This is a secure choice of `session_id` and the recommended choice, offered by
+  /// `SigningProtocol::recommended_session_id`. Reuse of `session_id` across signing sets/messages
+  /// will leak the private key.
   ///
   /// If delayed specification of signing set is desired, then `session_id` should be some
-  /// derivative of `(setup view, message, attempt number)` where only a single signing set will be
-  /// specified and moved forward with per attempt.
+  /// derivative of `(message, attempt number)` where only a single signing set will be specified
+  /// and moved forward with per attempt.
   ///
   /// If delayed specification of the message is desired (and optionally also the signing set),
-  /// then this should be some derivative of a global index for the setup where each index will
-  /// only be used for a single message (and signing set).
+  /// then this should be some derivative of a global index where each index will only be used for
+  /// a single message (and signing set).
   ///
   /// Delayed specification of the signing set/message was not proven secure in the paper.
   /// Post-specification of the signing set allows an adversary to bias the nonce via choice of
@@ -69,51 +158,71 @@ impl<P: Parameters, CG: Element> SigningProtocol<P, CG> {
   /// This code defers the derivation of session ID, and specification timeline, to the caller in
   /// order to enable these features if proven secure. The caller is trusted with the important,
   /// critical, and difficult responsibility of handling this securely. The only endorsed solution
-  /// is the hash of the view of the setup, the signing set, and the message.
+  /// is a session ID generated via `SigningProtocol::recommended_session_id` where only the
+  /// specified signing set has their messages accumulated.
   #[must_use]
   pub fn participate(
     rng: &mut (impl RngCore + CryptoRng),
-    setup: Arc<Setup<P, CG>>,
+    setup: Arc<Setup<CG, P>>,
     session_id: [u8; 32],
-  ) -> (Participating<P, CG>, Vec<u8>) {
+  ) -> (Participating<CG, P>, Vec<u8>) {
+    // Create the view of the protocol
+    let mut observing = Self::observe(setup.view().clone(), session_id);
+
+    // Participate in it
     let mut message = Vec::with_capacity(32 + 768 + (3 * 384));
-
     let (alpha_i, beta_i, u_i) = {
-      let nonce_i =
-        P::Evrf::prove(&mut *rng, setup.evrf_setup(), session_id, &mut message).unwrap();
+      let mut message = DigestWriter(observing.transcript.clone(), &mut message);
 
-      let alpha_i = Zeroizing::new(UnsignedInteger::random(
-        setup.view().class_group().unknown_order_bound() + 128,
-        &mut *rng,
-      ));
-      let alpha_i_bytes = Zeroizing::new(alpha_i.to_be_bytes());
-      let K_tilde_i = (
-        CG::mul(setup.view().G(), &alpha_i_bytes),
-        CG::mul(setup.view().Y(), &alpha_i_bytes).add(&CG::mul(
-          setup.view().class_group().f(),
-          &Zeroizing::new(crate::be_bytes(nonce_i.deref())),
-        )),
-      );
+      let alpha_i = {
+        // Sample the nonce
+        let evrf_context = context(&mut message.0);
+        let nonce_i =
+          P::Evrf::prove(&mut *rng, setup.evrf_setup(), evrf_context, &mut message).unwrap();
 
-      let beta_i = Zeroizing::new(UnsignedInteger::random(
-        setup.view().class_group().unknown_order_bound() + 128,
-        &mut *rng,
-      ));
-      let beta_i_bytes = Zeroizing::new(beta_i.to_be_bytes());
-      let u_i = Zeroizing::new(<P as Parameters>::F::random(&mut *rng));
-      let U_i = CG::mul(setup.view().G(), &beta_i_bytes)
-        .add(&CG::mul(setup.view().Y(), &Zeroizing::new(crate::be_bytes(u_i.deref()))));
+        // Create the ciphertext for it
+        let alpha_i = Zeroizing::new(UnsignedInteger::random(
+          setup.view().class_group().unknown_order_bound() + 128,
+          &mut *rng,
+        ));
+        let alpha_i_bytes = Zeroizing::new(alpha_i.to_be_bytes());
+        let K_tilde_i = (
+          CG::mul(setup.view().G(), &alpha_i_bytes),
+          CG::mul(setup.view().Y(), &alpha_i_bytes).add(&CG::mul(
+            setup.view().class_group().f(),
+            &Zeroizing::new(crate::be_bytes(nonce_i.deref())),
+          )),
+        );
 
-      K_tilde_i.0.compress(&mut message).unwrap();
-      K_tilde_i.1.compress(&mut message).unwrap();
+        // Write the ciphertext to our message
+        K_tilde_i.0.compress(&mut message).unwrap();
+        K_tilde_i.1.compress(&mut message).unwrap();
 
-      U_i.compress(&mut message).unwrap();
+        alpha_i
+      };
+
+      let (beta_i, u_i) = {
+        // Sample the multiplicative blinding factor
+        let u_i = Zeroizing::new(<P as Parameters<CG>>::F::random(&mut *rng));
+
+        // Create the commitment for it
+        let beta_i = Zeroizing::new(UnsignedInteger::random(
+          setup.view().class_group().unknown_order_bound() + 128,
+          &mut *rng,
+        ));
+        let beta_i_bytes = Zeroizing::new(beta_i.to_be_bytes());
+        let U_i = CG::mul(setup.view().G(), &beta_i_bytes)
+          .add(&CG::mul(setup.view().Y(), &Zeroizing::new(crate::be_bytes(u_i.deref()))));
+
+        // Write the commitment to our message
+        U_i.compress(&mut message).unwrap();
+
+        (beta_i, u_i)
+      };
 
       (alpha_i, beta_i, u_i)
     };
 
-    // Create the view of the protocol
-    let mut observing = Self::observe(setup.view().clone(), session_id);
     // Because this is the view if we're participating, accumulate our own participation
     match observing.accumulate(setup.i(), message.clone()) {
       Ready::Ready(_) => unreachable!("t == 1 barred at setup"),
@@ -127,14 +236,14 @@ impl<P: Parameters, CG: Element> SigningProtocol<P, CG> {
   }
   /// Observe the execution of the 2-round signing protocol.
   #[must_use]
-  pub fn observe(setup: Arc<SetupView<P, CG>>, session_id: [u8; 32]) -> Observing<P, CG> {
+  pub fn observe(setup: Arc<SetupView<CG, P>>, session_id: [u8; 32]) -> Observing<CG, P> {
+    let mut transcript = setup.transcript();
+    transcript.update(&session_id);
+
     Observing {
       setup,
-      session_id,
-      nonce_commitment: None,
-      K_tilde: None,
-      U: None,
-      accumulated: HashSet::new(),
+      transcript,
+      accumulated: HashMap::new(),
       faulty: HashSet::new(),
       pending: HashMap::new(),
     }
@@ -163,25 +272,26 @@ pub enum Ready<NotReady, Ready> {
 /// The view of someone who has observed the first round and can observe signature shares once the
 /// message is specified.
 // "signature shares" is loosely defined here as the round two messages.
-pub struct ObservingSigning<P: Parameters, CG: Element> {
-  setup: Arc<SetupView<P, CG>>,
-  nonce_commitment: P::E,
-  K_tilde: (CG, CG),
-  U: CG,
-  // Map from Participant index to their lagrange interpolation factor
-  signing_set: HashMap<Participant, P::F>,
+pub struct ObservingSigning<CG: Element, P: Parameters<CG>> {
+  setup: Arc<SetupView<CG, P>>,
+  transcript: blake3::Hasher,
+  R: P::E,
+  K_tilde: (Table<CG>, Table<CG>),
+  U: Table<CG>,
+  lagrange_coefficients: HashMap<Participant, P::F>,
+  K_tilde_i_0_U_i: HashMap<Participant, (CG, CG)>,
 }
 
 /// The view of someone who has observed the first round and can now produce a signature share.
-pub struct Signing<P: Parameters, CG: Element> {
-  setup: Arc<Setup<P, CG>>,
+pub struct Signing<CG: Element, P: Parameters<CG>> {
+  setup: Arc<Setup<CG, P>>,
   alpha_i: Zeroizing<UnsignedInteger>,
   beta_i: Zeroizing<UnsignedInteger>,
-  u_i: Zeroizing<<P as Parameters>::F>,
-  observing_signing: ObservingSigning<P, CG>,
+  u_i: Zeroizing<<P as Parameters<CG>>::F>,
+  observing_signing: ObservingSigning<CG, P>,
 }
 
-impl<P: Parameters, CG: Element> Observing<P, CG> {
+impl<CG: Element, P: Parameters<CG>> Observing<CG, P> {
   /// Accumulate a message from a participant.
   ///
   /// Please see `Participating::accumulate` for more information. This method matches its
@@ -190,13 +300,13 @@ impl<P: Parameters, CG: Element> Observing<P, CG> {
     mut self,
     participant: Participant,
     message: Vec<u8>,
-  ) -> Ready<(Self, Option<RoundOneError>), ObservingSigning<P, CG>> {
+  ) -> Ready<(Self, Option<RoundOneError>), ObservingSigning<CG, P>> {
     // Verify the participant index
     if usize::from(u16::from(participant)) > self.setup.n() {
       return Ready::NotReady((self, Some(RoundOneError::InvalidParticipant)));
     }
     // Verify they haven't already participated
-    if self.accumulated.contains(&participant) ||
+    if self.accumulated.contains_key(&participant) ||
       self.faulty.contains(&participant) ||
       self.pending.contains_key(&participant)
     {
@@ -214,12 +324,15 @@ impl<P: Parameters, CG: Element> Observing<P, CG> {
       // Prepare the batch verifications
       let mut evrf_batch_verifier = P::Evrf::batch_verifier();
       for (participant, message) in self.pending.drain() {
-        let mut message = message.as_slice();
-        let Ok(nonce_commitment) = P::Evrf::queue_verification(
+        let message = message.as_slice();
+        let mut message = DigestReader(self.transcript.clone(), message);
+
+        let evrf_context = context(&mut message.0);
+        let Ok(R_i) = P::Evrf::queue_verification(
           &mut evrf_batch_verifier,
           participant,
           self.setup.evrf_setup(&participant).unwrap(),
-          self.session_id,
+          evrf_context,
           &mut message,
         ) else {
           faulty.insert(participant);
@@ -237,7 +350,7 @@ impl<P: Parameters, CG: Element> Observing<P, CG> {
           faulty.insert(participant);
           continue;
         };
-        messages.insert(participant, (nonce_commitment, K_tilde_i_0, K_tilde_i_1, U_i));
+        messages.insert(participant, (message.0, R_i, (K_tilde_i_0, K_tilde_i_1), U_i));
       }
 
       // Perform the batch verifications
@@ -251,21 +364,12 @@ impl<P: Parameters, CG: Element> Observing<P, CG> {
       }
 
       // Move forward with the valid messages
-      for (participant, (nonce_commitment, K_tilde_i_0, K_tilde_i_1, U_i)) in messages {
+      for (participant, values) in messages {
         if faulty.contains(&participant) {
           continue;
         }
 
-        self.nonce_commitment = self
-          .nonce_commitment
-          .map(|existing| existing + nonce_commitment)
-          .or(Some(nonce_commitment));
-        self.K_tilde = self
-          .K_tilde
-          .map(|K_tilde| (K_tilde.0.add(&K_tilde_i_0), K_tilde.1.add(&K_tilde_i_1)))
-          .or(Some((K_tilde_i_0, K_tilde_i_1)));
-        self.U = self.U.map(|existing| existing.add(&U_i)).or(Some(U_i));
-        self.accumulated.insert(participant);
+        self.accumulated.insert(participant, values);
       }
     }
 
@@ -278,16 +382,49 @@ impl<P: Parameters, CG: Element> Observing<P, CG> {
     if self.accumulated.len() == usize::from(self.setup.t()) {
       // Since we run upon `t` potentially valid messages, `t` valid should mean none were invalid
       debug_assert!(faulty.is_empty());
-      let signing_set = self.accumulated.into_iter().collect::<Vec<_>>();
+
+      let mut signing_set = self.accumulated.keys().copied().collect::<Vec<_>>();
+      signing_set.sort();
+
+      // Calculate the sums of the contributions
+      let mut R = None;
+      let mut K_tilde: Option<(CG, CG)> = None;
+      let mut U: Option<CG> = None;
+      let mut K_tilde_i_0_U_i = HashMap::new();
+      for participant in &signing_set {
+        let (transcript, R_i, K_tilde_i, U_i) = self.accumulated.remove(participant).unwrap();
+        // Fold this transcript back into our own transcript
+        self.transcript.update(&u16::from(*participant).to_le_bytes());
+        self.transcript.update(&<[u8; 32]>::from(transcript.finalize()));
+
+        // The usage of None avoids an `identity + E` group op, even if it is a bit ugly
+        R = R.map(|existing| existing + R_i).or(Some(R_i));
+        K_tilde = K_tilde
+          .map(|K_tilde| (K_tilde.0.add(&K_tilde_i.0), K_tilde.1.add(&K_tilde_i.1)))
+          .or(Some((K_tilde_i.0.clone(), K_tilde_i.1)));
+        U = U.map(|U| U.add(&U_i)).or(Some(U_i.clone()));
+
+        K_tilde_i_0_U_i.insert(*participant, (K_tilde_i.0, U_i));
+      }
+      let K_tilde =
+        table_scaled_decryption_ciphertext::<CG, P>(self.setup.class_group(), K_tilde.unwrap());
+      let U = Table::new_for_scalar_bits(
+        2 * usize::try_from(self.setup.class_group().unknown_order_bound() + 128).unwrap(),
+        self.setup.class_group().identity_p().clone(),
+        U.unwrap(),
+      );
+
       return Ready::Ready(ObservingSigning {
         setup: self.setup,
-        nonce_commitment: self.nonce_commitment.unwrap(),
-        K_tilde: self.K_tilde.unwrap(),
-        U: self.U.unwrap(),
-        signing_set: signing_set
+        transcript: self.transcript,
+        R: R.unwrap(),
+        K_tilde,
+        U,
+        lagrange_coefficients: signing_set
           .iter()
           .map(|participant| (*participant, dkg::lagrange::<P::F>(*participant, &signing_set)))
           .collect(),
+        K_tilde_i_0_U_i,
       });
     }
 
@@ -302,7 +439,7 @@ impl<P: Parameters, CG: Element> Observing<P, CG> {
   }
 }
 
-impl<P: Parameters, CG: Element> Participating<P, CG> {
+impl<CG: Element, P: Parameters<CG>> Participating<CG, P> {
   /// Accumulate a message from a participant.
   ///
   /// This message is expected to be authenticated as originating from the sender by the caller.
@@ -319,7 +456,7 @@ impl<P: Parameters, CG: Element> Participating<P, CG> {
     mut self,
     participant: Participant,
     message: Vec<u8>,
-  ) -> Ready<(Self, Option<RoundOneError>), Signing<P, CG>> {
+  ) -> Ready<(Self, Option<RoundOneError>), Signing<CG, P>> {
     match self.observing.accumulate(participant, message) {
       Ready::Ready(observing_signing) => Ready::Ready(Signing {
         setup: self.setup,
@@ -337,29 +474,33 @@ impl<P: Parameters, CG: Element> Participating<P, CG> {
 }
 
 /// The view of someone aggregating signature shares to obtain the resulting signature.
-pub struct Aggregating<P: Parameters, CG: Element> {
-  observing_signing: ObservingSigning<P, CG>,
-  x_coordinate: <P as Parameters>::F,
-  message_hash: <P as Parameters>::F,
-  Z_tilde: (CG, CG),
+pub struct Aggregating<CG: Element, P: Parameters<CG>> {
+  observing_signing: ObservingSigning<CG, P>,
+  x_coordinate: <P as Parameters<CG>>::F,
+  message_hash: <P as Parameters<CG>>::F,
+  Z_tilde: (Table<CG>, Table<CG>),
 
-  accumulated: HashSet<Participant>,
-  faulty: HashSet<Participant>,
   pending: HashMap<Participant, Vec<u8>>,
-
-  ZU: Option<CG>,
-  KU: Option<CG>,
 }
 
-impl<P: Parameters, CG: Element> ObservingSigning<P, CG> {
+impl<CG: Element, P: Parameters<CG>> ObservingSigning<CG, P> {
   /// Observe the signing of the following message.
   #[must_use]
-  pub fn message(self, message: &[u8]) -> Aggregating<P, CG> {
-    let x_coordinate = P::x_coordinate(&self.nonce_commitment);
+  pub fn message(mut self, message: &[u8]) -> Aggregating<CG, P> {
+    // We don't transcript this as it's deterministic to the transcripted nonce commitment
+    let x_coordinate = P::x_coordinate(&self.R);
+
     let message_hash = P::hash_message(message);
+    // Transcript the message (hash)
+    /*
+      This may already be hashed as part of the `session_id` yet this code doesn't make that
+      assumption, and here is where the code first gets access to the message as it's where the
+      message is first needed by the protocol (even if prior needed by the security proofs)
+    */
+    self.transcript.update(message_hash.to_repr().as_ref());
 
     let mut C_tilde: Option<(CG, CG)> = None;
-    for (participant, lagrange) in &self.signing_set {
+    for (participant, lagrange) in &self.lagrange_coefficients {
       let share_ciphertext = self
         .setup
         .share_ciphertext(participant)
@@ -373,13 +514,15 @@ impl<P: Parameters, CG: Element> ObservingSigning<P, CG> {
         .map(|existing| (existing.0.add(&share_ciphertext.0), existing.1.add(&share_ciphertext.1)))
         .or_else(|| Some(share_ciphertext.clone()));
     }
+    // We don't transcript this as it's deterministic to the transcripted setup + signing set
     let C_tilde = C_tilde.unwrap();
 
     let x_coordinate_bytes = crate::be_bytes(&x_coordinate);
+    // Again, not transcripted as deterministic to the transcript
     let r_C_tilde = (
       CG::mul(
         &Table::new_for_scalar_bits(
-          <P as Parameters>::F::NUM_BITS.try_into().unwrap(),
+          <P as Parameters<CG>>::F::NUM_BITS.try_into().unwrap(),
           self.setup.class_group().identity_p().clone(),
           C_tilde.0,
         ),
@@ -391,33 +534,31 @@ impl<P: Parameters, CG: Element> ObservingSigning<P, CG> {
       // any scaling of a class-group element
       CG::mul(
         &Table::new_for_scalar_bits(
-          <P as Parameters>::F::NUM_BITS.try_into().unwrap(),
+          <P as Parameters<CG>>::F::NUM_BITS.try_into().unwrap(),
           self.setup.class_group().identity_p().clone(),
           C_tilde.1,
         ),
         &x_coordinate_bytes,
       ),
     );
+    // Again, not transcripted as deterministic (and therefore already bound) to the transcript
     let Z_tilde = (
       r_C_tilde.0,
       CG::mul(&self.setup.class_group().f(), &crate::be_bytes(&message_hash)).add(&r_C_tilde.1),
     );
+    let Z_tilde = table_scaled_decryption_ciphertext::<CG, P>(self.setup.class_group(), Z_tilde);
 
     Aggregating {
       observing_signing: self,
       x_coordinate,
       message_hash,
       Z_tilde,
-      accumulated: HashSet::new(),
-      faulty: HashSet::new(),
       pending: HashMap::new(),
-      ZU: None,
-      KU: None,
     }
   }
 }
 
-impl<P: Parameters, CG: Element> Signing<P, CG> {
+impl<CG: Element, P: Parameters<CG>> Signing<CG, P> {
   /// Participate in signing the following message.
   ///
   /// Returns the participant's message and the view necessary to obtain the resulting signature.
@@ -425,69 +566,74 @@ impl<P: Parameters, CG: Element> Signing<P, CG> {
   /// Please see `SigningProtocol::participate` for the long commentary on when this must be
   /// determined.
   #[must_use]
-  pub fn sign(self, message: &[u8]) -> (Aggregating<P, CG>, Vec<u8>) {
+  pub fn sign(
+    self,
+    rng: &mut (impl RngCore + CryptoRng),
+    message: &[u8],
+  ) -> (Aggregating<CG, P>, Vec<u8>) {
     let mut aggregating = self.observing_signing.message(message);
 
-    fn scaled_decryption<P: Parameters, CG: Element>(
-      class_group: &ClassGroup<CG>,
-      A_tilde: (CG, CG),
-      B: CG,
+    fn scaled_decryption<CG: Element, P: Parameters<CG>>(
+      A_tilde: &(Table<CG>, Table<CG>),
+      B: &Table<CG>,
       alpha_i: &UnsignedInteger,
       beta_i: &UnsignedInteger,
-      b_i: &<P as Parameters>::F,
+      b_i: &<P as Parameters<CG>>::F,
     ) -> CG {
-      // TODO: Cache/reuse these tables
-      let A_tilde_0 = Table::new_for_scalar_bits(
-        (class_group.unknown_order_bound() + 128).try_into().unwrap(),
-        class_group.identity_p().clone(),
-        A_tilde.0,
-      );
-      let A_tilde_1 = Table::new_for_scalar_bits(
-        <P as Parameters>::F::NUM_BITS.try_into().unwrap(),
-        class_group.identity_p().clone(),
-        A_tilde.1,
-      );
-      let B = Table::new_for_scalar_bits(
-        (class_group.unknown_order_bound() + 128).try_into().unwrap(),
-        class_group.identity_p().clone(),
-        B,
-      );
-      // We don't calculate C_tilde_0 as it isn't actually used by the rest of this protocol
       // TODO: Calculate this with a multiexp
-      let C_tilde_i_1 = CG::mul(&A_tilde_1, &Zeroizing::new(crate::be_bytes(b_i)));
+      let C_tilde_i_1 = CG::mul(&A_tilde.1, &Zeroizing::new(crate::be_bytes(b_i)));
       let F_i = CG::mul(&B, &Zeroizing::new(alpha_i.to_be_bytes()))
-        .sub(CG::mul(&A_tilde_0, &Zeroizing::new(beta_i.to_be_bytes())));
+        .sub(CG::mul(&A_tilde.0, &Zeroizing::new(beta_i.to_be_bytes())));
       C_tilde_i_1.sub(F_i)
     }
 
     let mut message = Vec::with_capacity(2 * 384);
-    // (H(m) + rx) * u
-    scaled_decryption::<P, CG>(
-      self.setup.view().class_group(),
-      aggregating.Z_tilde.clone(),
-      aggregating.observing_signing.U.clone(),
-      &Zeroizing::new(
-        self.setup.share_ciphertext_opening() *
-          &(&UnsignedInteger::from_be_slice(&crate::be_bytes(&aggregating.x_coordinate)) *
-            &UnsignedInteger::from_be_slice(&crate::be_bytes(
-              &aggregating.observing_signing.signing_set[&self.setup.i()],
-            ))),
-      ),
-      &self.beta_i,
-      &self.u_i,
-    )
-    .compress(&mut message)
-    .unwrap();
-    // k * u
-    scaled_decryption::<P, CG>(
-      self.setup.view().class_group(),
-      aggregating.observing_signing.K_tilde.clone(),
-      aggregating.observing_signing.U.clone(),
+    let mut transcript = {
+      let mut message =
+        DigestWriter(aggregating.observing_signing.transcript.clone(), &mut message);
+      // (H(m) + rx) * u
+      scaled_decryption::<CG, P>(
+        &aggregating.Z_tilde,
+        &aggregating.observing_signing.U,
+        &Zeroizing::new(
+          self.setup.share_ciphertext_opening() *
+            &(&UnsignedInteger::from_be_slice(&crate::be_bytes(&aggregating.x_coordinate)) *
+              &UnsignedInteger::from_be_slice(&crate::be_bytes(
+                &aggregating.observing_signing.lagrange_coefficients[&self.setup.i()],
+              ))),
+        ),
+        &self.beta_i,
+        &self.u_i,
+      )
+      .compress(&mut message)
+      .unwrap();
+      // k * u
+      scaled_decryption::<CG, P>(
+        &aggregating.observing_signing.K_tilde,
+        &aggregating.observing_signing.U,
+        &self.alpha_i,
+        &self.beta_i,
+        &self.u_i,
+      )
+      .compress(&mut message)
+      .unwrap();
+      message.0
+    };
+
+    let round_two_proofs_context = context(&mut transcript);
+    P::RoundTwoProofs::prove(
+      rng,
+      round_two_proofs_context,
+      self.setup.view().G(),
+      self.setup.view().Y(),
+      &aggregating.Z_tilde,
+      &aggregating.observing_signing.K_tilde,
+      &aggregating.observing_signing.U,
       &self.alpha_i,
       &self.beta_i,
       &self.u_i,
+      &mut message,
     )
-    .compress(&mut message)
     .unwrap();
 
     // Because this is the view if we're participating, accumulate our own signature share
@@ -503,14 +649,12 @@ impl<P: Parameters, CG: Element> Signing<P, CG> {
   }
 }
 
-/// An error from the second round of the signing protocol.
-pub enum RoundTwoError {
+/// An error from the second round of the signing protocol due to how it was called.
+pub enum RoundTwoCallerError {
   /// This participant has already participated.
   AlreadyParticipated,
   /// The signature share was not from someone participating in this signing protocol.
   NotAParticipant,
-  /// The following participants were faulty.
-  Faults(Vec<Participant>),
 }
 
 /// An ECDSA signature.
@@ -531,7 +675,7 @@ impl<F: PrimeFieldBits> Signature<F> {
   }
 }
 
-impl<P: Parameters, CG: Element> Aggregating<P, CG> {
+impl<CG: Element, P: Parameters<CG>> Aggregating<CG, P> {
   /// Aggregate a signature share from a participant.
   ///
   /// This message is expected to be authenticated as originating from the sender by the caller.
@@ -545,28 +689,32 @@ impl<P: Parameters, CG: Element> Aggregating<P, CG> {
     mut self,
     participant: Participant,
     message: Vec<u8>,
-  ) -> Ready<(Self, Option<RoundTwoError>), Signature<<P as Parameters>::F>> {
+  ) -> Ready<
+    (Self, Option<RoundTwoCallerError>),
+    Result<Signature<<P as Parameters<CG>>::F>, Vec<Participant>>,
+  > {
     // Verify they haven't already participated
-    if self.accumulated.contains(&participant) ||
-      self.faulty.contains(&participant) ||
-      self.pending.contains_key(&participant)
-    {
-      return Ready::NotReady((self, Some(RoundTwoError::AlreadyParticipated)));
+    if self.pending.contains_key(&participant) {
+      return Ready::NotReady((self, Some(RoundTwoCallerError::AlreadyParticipated)));
     }
     // Verify they were in the signing set
-    if !self.observing_signing.signing_set.contains_key(&participant) {
-      return Ready::NotReady((self, Some(RoundTwoError::NotAParticipant)));
+    if !self.observing_signing.lagrange_coefficients.contains_key(&participant) {
+      return Ready::NotReady((self, Some(RoundTwoCallerError::NotAParticipant)));
     }
     // Mark their message as pending
     self.pending.insert(participant, message);
 
-    // If we're now at the threshold, batch verify the pending messages and move them to
-    // accumulated
+    // If we're now at the threshold, attempt to yield the signature
     let setup = &self.observing_signing.setup;
-    let mut faulty = vec![];
-    if (self.accumulated.len() + self.pending.len()) == usize::from(setup.t()) {
+    if self.pending.len() == usize::from(setup.t()) {
+      let mut faulty = vec![];
+      let mut ZU: Option<CG> = None;
+      let mut KU: Option<CG> = None;
+      let mut messages = HashMap::new();
       for (participant, message) in self.pending.drain() {
-        let mut message = message.as_slice();
+        let message = message.as_slice();
+        let mut message = DigestReader(self.observing_signing.transcript.clone(), message);
+
         let Ok(ZU_i) = setup.class_group().decompress_p(&mut message) else {
           faulty.push(participant);
           continue;
@@ -576,49 +724,78 @@ impl<P: Parameters, CG: Element> Aggregating<P, CG> {
           continue;
         };
 
-        self.ZU = self.ZU.map(|ZU| ZU.add(&ZU_i)).or(Some(ZU_i));
-        self.KU = self.KU.map(|KU| KU.add(&KU_i)).or(Some(KU_i));
-        self.accumulated.insert(participant);
+        ZU = ZU.map(|ZU| ZU.add(&ZU_i)).or(Some(ZU_i.clone()));
+        KU = KU.map(|KU| KU.add(&KU_i)).or(Some(KU_i.clone()));
+        messages.insert(participant, (message.0, ZU_i, KU_i, message.1.to_vec()));
       }
-    }
-    for faulty in &faulty {
-      self.faulty.insert(*faulty);
-    }
 
-    // If we've accumulated `t` messages, output the signature
-    if self.accumulated.len() == usize::from(setup.t()) {
-      // Since we run upon `t` potentially valid messages, `t` valid should mean none were invalid
-      debug_assert!(faulty.is_empty());
-
-      let be_bytes_to_scalar = |bytes| {
-        let mut res = P::F::ZERO;
-        for b in bytes {
-          for _ in 0 .. 8 {
-            res = res.double();
+      if faulty.is_empty() {
+        let be_bytes_to_scalar = |bytes| {
+          let mut res = P::F::ZERO;
+          for b in bytes {
+            for _ in 0 .. 8 {
+              res = res.double();
+            }
+            res += P::F::from(u64::from(b));
           }
-          res += P::F::from(u64::from(b));
+          res
+        };
+
+        let discrete_logarithm = |element: CG| {
+          let log = setup.class_group().discrete_logarithm(&element).unwrap();
+          be_bytes_to_scalar(log)
+        };
+
+        let numerator = discrete_logarithm(ZU.unwrap());
+        let denominator = discrete_logarithm(KU.unwrap());
+
+        let r = self.x_coordinate;
+        let s = numerator * denominator.invert().unwrap();
+
+        // If we produced a valid signature, don't verify the proofs and simply yield the signature
+        // A valid signature means the protocol elements were correct, ignoring possible malleation
+        // s = (H(m) + rx)/k
+        // sR = (H(m) + rx)/k * kG = (H(m) + rx)G
+        let lhs = self.observing_signing.R * s;
+        let rhs =
+          (P::E::generator() * self.message_hash) + (setup.verification_key() * self.x_coordinate);
+        if lhs == rhs {
+          return Ready::Ready(Ok(Signature { r, s }));
         }
-        res
-      };
+      }
 
-      let checked_discrete_logarithm = |element: CG| {
-        let log = setup.class_group().discrete_logarithm(&element).unwrap();
-        assert_eq!(CG::mul(setup.class_group().f(), &log), element);
-        be_bytes_to_scalar(log)
-      };
-
-      let numerator = checked_discrete_logarithm(self.ZU.unwrap());
-      let denominator = checked_discrete_logarithm(self.KU.unwrap());
-
-      let r = self.x_coordinate;
-      let s = numerator * denominator.invert().unwrap();
-
-      return Ready::Ready(Signature { r, s });
+      // Verify the proofs to identify any other faulty participants
+      for (participant, (mut transcript, ZU_i, KU_i, proof)) in messages {
+        let round_two_proofs_context = context(&mut transcript);
+        let (K_tilde_i_0, U_i) =
+          self.observing_signing.K_tilde_i_0_U_i.remove(&participant).unwrap();
+        // We do calculate Z_tilde prior, but not Z_tilde_i prior, so we calculcate this here
+        let Z_tilde_i_0 = CG::mul(
+          &setup.share_ciphertext(&participant).unwrap().0,
+          &crate::be_bytes(&self.observing_signing.lagrange_coefficients[&participant]),
+        );
+        if P::RoundTwoProofs::verify(
+          round_two_proofs_context,
+          setup.G(),
+          setup.Y(),
+          &self.Z_tilde,
+          &self.observing_signing.K_tilde,
+          &self.observing_signing.U,
+          Z_tilde_i_0,
+          K_tilde_i_0,
+          U_i,
+          ZU_i,
+          KU_i,
+          &mut proof.as_slice(),
+        )
+        .is_err()
+        {
+          faulty.push(participant);
+        }
+      }
+      return Ready::Ready(Err(faulty));
     }
 
-    Ready::NotReady((
-      self,
-      if faulty.is_empty() { None } else { Some(RoundTwoError::Faults(faulty)) },
-    ))
+    Ready::NotReady((self, None))
   }
 }

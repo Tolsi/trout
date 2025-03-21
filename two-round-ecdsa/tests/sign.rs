@@ -5,7 +5,7 @@ use two_round_ecdsa::{SecurityLevel, Setup, SigningProtocol, Ready};
 
 #[test]
 fn sign() {
-  let mut setups = Setup::<two_round_ecdsa::Secp256k1, MalachiteElement>::dealer(
+  let mut setups = Setup::<MalachiteElement, two_round_ecdsa::Secp256k1<_>>::dealer(
     &mut OsRng,
     SecurityLevel::Insecure,
     2,
@@ -20,9 +20,9 @@ fn sign() {
   let second = setups.remove(&second_i).unwrap();
 
   let (first, first_message) =
-    SigningProtocol::<two_round_ecdsa::Secp256k1, _>::participate(&mut OsRng, first, [0; 32]);
+    SigningProtocol::<_, two_round_ecdsa::Secp256k1<_>>::participate(&mut OsRng, first, [0; 32]);
   let (second, second_message) =
-    SigningProtocol::<two_round_ecdsa::Secp256k1, _>::participate(&mut OsRng, second, [0; 32]);
+    SigningProtocol::<_, two_round_ecdsa::Secp256k1<_>>::participate(&mut OsRng, second, [0; 32]);
   println!("Participated!");
 
   let Ready::Ready(first) = first.accumulate(second_i, second_message) else { panic!() };
@@ -30,12 +30,14 @@ fn sign() {
   println!("Accumulated!");
 
   const MESSAGE: &[u8] = b"Hello, World!";
-  let (first, first_message) = first.sign(MESSAGE);
-  let (second, second_message) = second.sign(MESSAGE);
+  let (first, first_message) = first.sign(&mut OsRng, MESSAGE);
+  let (second, second_message) = second.sign(&mut OsRng, MESSAGE);
   println!("Signed!");
 
   let Ready::Ready(first_signature) = first.aggregate(second_i, second_message) else { panic!() };
   let Ready::Ready(second_signature) = second.aggregate(first_i, first_message) else { panic!() };
+  let first_signature = first_signature.unwrap();
+  let second_signature = second_signature.unwrap();
   assert_eq!(first_signature, second_signature);
   println!("Aggregated!");
 

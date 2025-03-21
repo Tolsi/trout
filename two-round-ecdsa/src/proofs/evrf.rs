@@ -28,18 +28,21 @@ pub trait Evrf<E: PrimeGroup<Scalar: Zeroize>> {
 
   /// Invoke the eVRF to obtain a random value.
   ///
+  /// The context MUST be binding to the setup and the invocation. This allows the eVRF
+  /// implementation to not have to transcript these itself.
+  ///
   /// The proof is written to `proof`. If this function returns an error, the status of `proof` is
   /// undefined.
   fn prove(
     rng: &mut (impl RngCore + CryptoRng),
     setup: &Self::Setup,
-    session_id: [u8; 32],
+    context: [u8; 32],
     proof: impl io::Write,
   ) -> io::Result<Zeroizing<E::Scalar>>;
 
   /// Create a batch verifier of eVRFs.
   fn batch_verifier() -> Self::BatchVerifier;
-  /// Queue verification of someone else's invocation of the eVRF.
+  /// Queue verification of someone's invocation of the eVRF.
   ///
   /// Returns the commitment to the value over the generator of the elliptic curve. This commitment
   /// is not guaranteed to be verified at this time. The batch verifier must be verified for this
@@ -52,7 +55,7 @@ pub trait Evrf<E: PrimeGroup<Scalar: Zeroize>> {
     batch_verifier: &mut Self::BatchVerifier,
     participant: dkg::Participant,
     setup: &Self::SetupView,
-    session_id: [u8; 32],
+    context: [u8; 32],
     proof: impl io::Read,
   ) -> io::Result<E>;
   /// Verify all proofs within the batch verifier.
@@ -84,7 +87,7 @@ impl<E: PrimeGroup<Scalar: Zeroize>> Evrf<E> for DummyEvrf {
   fn prove(
     rng: &mut (impl RngCore + CryptoRng),
     _setup: &Self::Setup,
-    _session_id: [u8; 32],
+    _context: [u8; 32],
     mut proof: impl io::Write,
   ) -> io::Result<Zeroizing<E::Scalar>> {
     let nonce = Zeroizing::new(E::Scalar::random(rng));
@@ -97,7 +100,7 @@ impl<E: PrimeGroup<Scalar: Zeroize>> Evrf<E> for DummyEvrf {
     _batch_verifier: &mut Self::BatchVerifier,
     _participant: dkg::Participant,
     _setup: &Self::SetupView,
-    _session_id: [u8; 32],
+    _context: [u8; 32],
     mut proof: impl io::Read,
   ) -> io::Result<E> {
     let mut nonce_commitment = E::Repr::default();

@@ -3,9 +3,12 @@
 #![deny(missing_docs)]
 #![allow(non_snake_case)]
 
+use core::marker::PhantomData;
+
 use zeroize::Zeroize;
 
 use group::{ff::PrimeFieldBits, prime::PrimeGroup};
+use class_groups::Element;
 
 mod integer;
 pub use integer::UnsignedInteger;
@@ -30,7 +33,7 @@ pub(crate) fn be_bytes<F: PrimeFieldBits>(scalar: &F) -> Vec<u8> {
 }
 
 /// ECDSA parameters.
-pub trait Parameters {
+pub trait Parameters<CG: Element> {
   /// The elliptic curve.
   type E: PrimeGroup<Scalar = Self::F>;
   /// The scalar field of the elliptic curve.
@@ -38,6 +41,8 @@ pub trait Parameters {
 
   /// The eVRF to use.
   type Evrf: Evrf<Self::E>;
+  /// The round two proofs.
+  type RoundTwoProofs: RoundTwoProofs<Self::E, CG>;
 
   /// Hash the message and reduce it into a scalar.
   fn hash_message(message: &[u8]) -> Self::F;
@@ -47,14 +52,15 @@ pub trait Parameters {
 
 /// ECDSA over secp256k1.
 #[cfg(feature = "secp256k1")]
-pub struct Secp256k1;
+pub struct Secp256k1<CG: Element>(PhantomData<CG>);
 #[cfg(feature = "secp256k1")]
-impl Parameters for Secp256k1 {
+impl<CG: Element> Parameters<CG> for Secp256k1<CG> {
   type E = k256::ProjectivePoint;
   type F = k256::Scalar;
 
   // TODO: Use a secure eVRF
   type Evrf = DummyEvrf;
+  type RoundTwoProofs = NoIdentifiableAborts;
 
   fn hash_message(message: &[u8]) -> Self::F {
     use sha2::{Digest, Sha256};

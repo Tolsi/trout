@@ -6,7 +6,7 @@ use rand_chacha::ChaCha20Rng;
 
 use group::{
   ff::{Field, PrimeField},
-  Group,
+  Group, GroupEncoding,
 };
 use class_groups::{Element, Table, ClassGroup};
 
@@ -19,79 +19,24 @@ use crate::{UnsignedInteger, Evrf, Parameters};
 /// These are defined per https://eprint.iacr.org/2020/196. Please note a rebuttal of this paper's
 /// definition exists in https://eprint.iacr.org/2021/291, as its Remark 1.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u8)]
 pub enum SecurityLevel {
-  /// A trivial class group which is insecure and MUST only be used for testing purposes.
-  Insecure,
   /// An 1827-bit discriminant with 128-bits of security per popular convention.
   ///
   /// This has a 2**-14.3 chance of being weaker than the targetted 128-bit security level.
-  OneHundredTwentyEightBit,
+  OneHundredTwentyEightBit = 0,
   /// A 2048-bit discriminant which should have 128-bits of security even with marginally improved
   /// attacks against class-groups.
-  ConservativeOneHundredTwentyEightBit,
+  ConservativeOneHundredTwentyEightBit = 1,
   /// A 4096-bit discriminant which only has 128-bits of security in a (2**-64)-case event.
-  VeryConservativeOneHundredTwentyEightBit,
+  VeryConservativeOneHundredTwentyEightBit = 2,
   /// A 6784-bit discriminant which only has 128-bits of security in a (2**-128)-case event.
-  ExtremelyConservativeOneHundredTwentyEightBit,
+  ExtremelyConservativeOneHundredTwentyEightBit = 3,
+  /// A trivial class group which is insecure and MUST only be used for testing purposes.
+  Insecure = 0xff,
 }
 
-/// A view of the setup for a multisig.
-#[derive(Clone)]
-pub struct SetupView<P: Parameters, CG: Element> {
-  t: u16,
-  class_group_seed: [u8; 32],
-  class_group: ClassGroup<CG>,
-  G: Table<CG>,
-  Y: Table<CG>,
-  verification_key: P::E,
-  // verification_shares: HashMap<Participant, P::E>,
-  evrf_setups: HashMap<Participant, <P::Evrf as Evrf<P::E>>::SetupView>,
-  share_ciphertexts: HashMap<Participant, (Table<CG>, Table<CG>)>,
-}
-
-impl<P: Parameters, CG: Element> SetupView<P, CG> {
-  pub(crate) fn t(&self) -> u16 {
-    self.t
-  }
-  pub(crate) fn n(&self) -> usize {
-    self.share_ciphertexts.len()
-  }
-  pub(crate) fn class_group(&self) -> &ClassGroup<CG> {
-    &self.class_group
-  }
-  pub(crate) fn G(&self) -> &Table<CG> {
-    &self.G
-  }
-  pub(crate) fn Y(&self) -> &Table<CG> {
-    &self.Y
-  }
-  /// The ECDSA verification key.
-  pub fn verification_key(&self) -> P::E {
-    self.verification_key
-  }
-  pub(crate) fn evrf_setup(
-    &self,
-    participant: &Participant,
-  ) -> Option<&<P::Evrf as Evrf<P::E>>::SetupView> {
-    self.evrf_setups.get(participant)
-  }
-  pub(crate) fn share_ciphertext(
-    &self,
-    participant: &Participant,
-  ) -> Option<&(Table<CG>, Table<CG>)> {
-    self.share_ciphertexts.get(participant)
-  }
-}
-
-/// The result of the setup for a participant.
-pub struct Setup<P: Parameters, CG: Element> {
-  view: Arc<SetupView<P, CG>>,
-  i: Participant,
-  evrf_setup: <P::Evrf as Evrf<P::E>>::Setup,
-  share_ciphertext_opening: Zeroizing<(UnsignedInteger, P::F)>,
-}
-
-fn class_group<P: Parameters, CG: Element>(
+fn class_group<CG: Element, P: Parameters<CG>>(
   seed: [u8; 32],
   security_level: SecurityLevel,
 ) -> (ClassGroup<CG>, Table<CG>, Table<CG>) {
@@ -127,9 +72,143 @@ fn class_group<P: Parameters, CG: Element>(
   (class_group, G, Y)
 }
 
-impl<P: Parameters, CG: Element> Setup<P, CG> {
+/// A view of the setup for a multisig.
+#[derive(Clone)]
+pub struct SetupView<CG: Element, P: Parameters<CG>> {
+  t: u16,
+  class_group_seed: [u8; 32],
+  class_group: ClassGroup<CG>,
+  G: Table<CG>,
+  Y: Table<CG>,
+  verification_key: P::E,
+  // verification_shares: HashMap<Participant, P::E>,
+  evrf_setups: HashMap<Participant, <P::Evrf as Evrf<P::E>>::SetupView>,
+  share_ciphertexts: HashMap<Participant, (Table<CG>, Table<CG>)>,
+
+  // The transcript of this view
+  transcript: blake3::Hasher,
+}
+
+impl<CG: Element, P: Parameters<CG>> SetupView<CG, P> {
+  // This is only 'internal' due to assumptions regarding the `HashMap`s
+  // They aren't validated with an error returned if they're wrong
+  fn new_internal(
+    t: u16,
+    class_group_seed: [u8; 32],
+    security_level: SecurityLevel,
+    verification_key: P::E,
+    evrf_setups: HashMap<Participant, <P::Evrf as Evrf<P::E>>::SetupView>,
+    share_ciphertexts: HashMap<Participant, (CG, CG)>,
+  ) -> Self {
+    assert_eq!(evrf_setups.len(), share_ciphertexts.len());
+    let n = u16::try_from(evrf_setups.len()).unwrap();
+
+    // Transcript the parameters for the set
+    let mut transcript = blake3::Hasher::new();
+    transcript.update(&t.to_le_bytes());
+    transcript.update(&n.to_le_bytes());
+    transcript.update(&class_group_seed);
+    transcript.update(&[security_level as u8]);
+    transcript.update(P::E::generator().to_bytes().as_ref());
+    transcript.update(verification_key.to_bytes().as_ref());
+
+    // Transcript the per-participant data
+    {
+      // A buffer we reuse for compressed class-group elements
+      let mut buf = Vec::with_capacity(384);
+      for participant in (1 ..= n).map(|i| Participant::new(i).unwrap()) {
+        // TODO: Also transcript the eVRF setups here
+
+        let ciphertext = &share_ciphertexts[&participant];
+
+        // These are canonical and self-prefixing, so there's no risk of malleation here
+        ciphertext.0.compress(&mut buf).unwrap();
+        transcript.update(&buf);
+        buf.clear();
+
+        ciphertext.1.compress(&mut buf).unwrap();
+        transcript.update(&buf);
+        buf.clear();
+      }
+    }
+
+    let (class_group, G, Y) = class_group::<CG, P>(class_group_seed, security_level);
+
+    let share_ciphertexts = share_ciphertexts
+      .into_iter()
+      .map(|(participant, (C_0, C_1))| {
+        (
+          participant,
+          (
+            Table::new(10, class_group.identity_p().clone(), C_0),
+            Table::new(10, class_group.identity_p().clone(), C_1),
+          ),
+        )
+      })
+      .collect();
+
+    Self {
+      t,
+      class_group_seed,
+      class_group,
+      G,
+      Y,
+      verification_key,
+      evrf_setups,
+      share_ciphertexts,
+      transcript,
+    }
+  }
+
+  pub(crate) fn t(&self) -> u16 {
+    self.t
+  }
+  pub(crate) fn n(&self) -> usize {
+    self.share_ciphertexts.len()
+  }
+  pub(crate) fn class_group(&self) -> &ClassGroup<CG> {
+    &self.class_group
+  }
+  pub(crate) fn G(&self) -> &Table<CG> {
+    &self.G
+  }
+  pub(crate) fn Y(&self) -> &Table<CG> {
+    &self.Y
+  }
+  /// The ECDSA verification key.
+  pub fn verification_key(&self) -> P::E {
+    self.verification_key
+  }
+  pub(crate) fn evrf_setup(
+    &self,
+    participant: &Participant,
+  ) -> Option<&<P::Evrf as Evrf<P::E>>::SetupView> {
+    self.evrf_setups.get(participant)
+  }
+  pub(crate) fn share_ciphertext(
+    &self,
+    participant: &Participant,
+  ) -> Option<&(Table<CG>, Table<CG>)> {
+    self.share_ciphertexts.get(participant)
+  }
+
+  /// The transcript of this view of the setup.
+  pub fn transcript(&self) -> blake3::Hasher {
+    self.transcript.clone()
+  }
+}
+
+/// The result of the setup for a participant.
+pub struct Setup<CG: Element, P: Parameters<CG>> {
+  view: Arc<SetupView<CG, P>>,
+  i: Participant,
+  evrf_setup: <P::Evrf as Evrf<P::E>>::Setup,
+  share_ciphertext_opening: Zeroizing<(UnsignedInteger, P::F)>,
+}
+
+impl<CG: Element, P: Parameters<CG>> Setup<CG, P> {
   /// The public view of the setup.
-  pub fn view(&self) -> &Arc<SetupView<P, CG>> {
+  pub fn view(&self) -> &Arc<SetupView<CG, P>> {
     &self.view
   }
 
@@ -160,7 +239,7 @@ impl<P: Parameters, CG: Element> Setup<P, CG> {
     security_level: SecurityLevel,
     t: u16,
     n: u16,
-  ) -> Option<HashMap<Participant, Arc<Setup<P, CG>>>> {
+  ) -> Option<HashMap<Participant, Arc<Setup<CG, P>>>> {
     {
       let valid_t_n = (t <= n) && (1 < t);
       if !valid_t_n {
@@ -170,7 +249,7 @@ impl<P: Parameters, CG: Element> Setup<P, CG> {
 
     let mut class_group_seed = [0; 32];
     rng.fill_bytes(&mut class_group_seed);
-    let (class_group, G, Y) = class_group::<P, CG>(class_group_seed, security_level);
+    let (class_group, G, Y) = class_group::<CG, P>(class_group_seed, security_level);
 
     // Generate `t` coefficients
     let mut coeffs = Zeroizing::new(vec![P::F::ZERO; usize::from(t)]);
@@ -221,29 +300,23 @@ impl<P: Parameters, CG: Element> Setup<P, CG> {
         (*participant, {
           let mask = Zeroizing::new(mask.to_be_bytes());
           (
-            Table::new(10, class_group.identity_p().clone(), CG::mul(&G, &mask)),
-            Table::new(
-              10,
-              class_group.identity_p().clone(),
-              CG::mul(&Y, &mask)
-                .add(&CG::mul(class_group.f(), &Zeroizing::new(crate::be_bytes(scalar)))),
-            ),
+            CG::mul(&G, &mask),
+            CG::mul(&Y, &mask)
+              .add(&CG::mul(class_group.f(), &Zeroizing::new(crate::be_bytes(scalar)))),
           )
         })
       })
       .collect();
 
     // Create the view
-    let view = Arc::new(SetupView {
+    let view = Arc::new(SetupView::new_internal(
       t,
       class_group_seed,
-      class_group,
-      G,
-      Y,
+      security_level,
       verification_key,
-      evrf_setups: evrf_setup_views,
+      evrf_setup_views,
       share_ciphertexts,
-    });
+    ));
 
     // Create each participant's setup
     let mut res = HashMap::new();
