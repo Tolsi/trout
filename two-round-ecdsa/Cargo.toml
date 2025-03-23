@@ -11,6 +11,7 @@ rand_chacha = { version = "0.3", default-features = false, features = ["std"] }
 
 crypto-bigint = { version = "0.6", default-features = false, features = ["zeroize", "alloc"] }
 crypto-primes = { version = "=0.6.2", default-features = false }
+rug = { version = "1", default-features = false, features = ["std", "integer"], optional = true }
 
 group = { version = "0.13", default-features = false, features = ["alloc"] }
 dkg = { version = "0.5", default-features = false, features = ["std"] }
@@ -27,4 +28,5 @@ ecdsa = { version = "0.16", default-features = false, features = ["std", "verify
 k256 = { version = "0.13", default-features = false, features = ["ecdsa"] }
 
 [features]
+gmp = ["rug"]
 secp256k1 = ["sha2", "k256"]

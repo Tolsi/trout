@@ -1,7 +1,6 @@
 use core::{marker::PhantomData, ops::Deref};
 use std::{
   sync::Arc,
-  io,
   collections::{HashSet, HashMap},
 };
 
@@ -16,34 +15,10 @@ use class_groups::{Element, Table, ClassGroup};
 
 use dkg::Participant;
 
-use crate::{UnsignedInteger, Evrf, RoundOneProofs, RoundTwoProofs, Parameters, SetupView, Setup};
-
-/*
-  Reader/Writer which transcripts what they read/write. The Reader avoids the read, decompress,
-  compress, hash flow solely read, hash, decompress. Since compressions can be expensive, this
-  is greatly appreciated, while the pattern also ensures our transcript is complete.
-*/
-struct DigestReader<R: io::Read>(blake3::Hasher, R);
-impl<R: io::Read> io::Read for DigestReader<R> {
-  fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-    let read_bytes = self.1.read(buf)?;
-    if read_bytes > buf.len() {
-      Err(io::Error::other("more bytes read than size of buffer"))?;
-    }
-    self.0.update(&buf[.. read_bytes]);
-    Ok(read_bytes)
-  }
-}
-struct DigestWriter<W: io::Write>(blake3::Hasher, W);
-impl<W: io::Write> io::Write for DigestWriter<W> {
-  fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-    self.0.update(buf);
-    self.1.write(buf)
-  }
-  fn flush(&mut self) -> io::Result<()> {
-    self.1.flush()
-  }
-}
+use crate::{
+  UnsignedInteger, DigestReader, DigestWriter, Evrf, RoundOneProofs, RoundTwoProofs, Parameters,
+  SetupView, Setup,
+};
 
 // Sample a context hash.
 fn context(hasher: &mut blake3::Hasher) -> [u8; 32] {
