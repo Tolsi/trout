@@ -1,9 +1,12 @@
 use std::io;
 
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 use rand_core::{RngCore, CryptoRng};
 
-use group::{ff::Field, prime::PrimeGroup};
+use group::{ff::Field, Group, GroupEncoding};
+use class_groups::Element;
+
+use crate::Parameters;
 
 /// An eVRF.
 ///
@@ -15,7 +18,7 @@ use group::{ff::Field, prime::PrimeGroup};
 /// - [An LWR-based construction](https://eprint.iacr.org/2024/996)
 ///
 /// The eVRF used is left to the choice of the caller.
-pub trait Evrf<E: PrimeGroup<Scalar: Zeroize>> {
+pub trait Evrf<CG: Element, P: Parameters<CG>> {
   /// The view of someone's setup, as necessary to verify someone's invocation of the eVRF.
   type SetupView: Clone;
   /// The setup, as necessary to invoke the eVRF.
@@ -38,7 +41,7 @@ pub trait Evrf<E: PrimeGroup<Scalar: Zeroize>> {
     setup: &Self::Setup,
     context: [u8; 32],
     proof: impl io::Write,
-  ) -> io::Result<Zeroizing<E::Scalar>>;
+  ) -> io::Result<Zeroizing<P::F>>;
 
   /// Create a batch verifier of eVRFs.
   fn batch_verifier() -> Self::BatchVerifier;
@@ -57,7 +60,7 @@ pub trait Evrf<E: PrimeGroup<Scalar: Zeroize>> {
     setup: &Self::SetupView,
     context: [u8; 32],
     proof: impl io::Read,
-  ) -> io::Result<E>;
+  ) -> io::Result<P::E>;
   /// Verify all proofs within the batch verifier.
   ///
   /// Returns `Ok(())` or a list of *all* of the *faulty* participants.
@@ -71,7 +74,7 @@ pub trait Evrf<E: PrimeGroup<Scalar: Zeroize>> {
 /// case future works prove the security of this scheme even without the eVRF (as
 /// https://eprint.iacr.org/2021/1449 implies the security of).
 pub struct DummyEvrf;
-impl<E: PrimeGroup<Scalar: Zeroize>> Evrf<E> for DummyEvrf {
+impl<CG: Element, P: Parameters<CG>> Evrf<CG, P> for DummyEvrf {
   type SetupView = ();
   type Setup = ();
   type BatchVerifier = ();
@@ -80,18 +83,16 @@ impl<E: PrimeGroup<Scalar: Zeroize>> Evrf<E> for DummyEvrf {
     ((), ())
   }
 
-  fn batch_verifier() -> Self::BatchVerifier {
-    ()
-  }
+  fn batch_verifier() -> Self::BatchVerifier {}
 
   fn prove(
     rng: &mut (impl RngCore + CryptoRng),
     _setup: &Self::Setup,
     _context: [u8; 32],
     mut proof: impl io::Write,
-  ) -> io::Result<Zeroizing<E::Scalar>> {
-    let nonce = Zeroizing::new(E::Scalar::random(rng));
-    let nonce_commitment = E::generator() * *nonce;
+  ) -> io::Result<Zeroizing<P::F>> {
+    let nonce = Zeroizing::new(P::F::random(rng));
+    let nonce_commitment = P::E::generator() * *nonce;
     proof.write_all(nonce_commitment.to_bytes().as_ref())?;
     Ok(nonce)
   }
@@ -101,15 +102,9 @@ impl<E: PrimeGroup<Scalar: Zeroize>> Evrf<E> for DummyEvrf {
     _participant: dkg::Participant,
     _setup: &Self::SetupView,
     _context: [u8; 32],
-    mut proof: impl io::Read,
-  ) -> io::Result<E> {
-    let mut nonce_commitment = E::Repr::default();
-    proof.read_exact(nonce_commitment.as_mut())?;
-    // TODO: This from_bytes doesn't guarantee canonicity
-    let Some(nonce_commitment) = Option::<E>::from(E::from_bytes(&nonce_commitment)) else {
-      Err(io::Error::other("nonce commitment was invalid"))?
-    };
-    Ok(nonce_commitment)
+    proof: impl io::Read,
+  ) -> io::Result<P::E> {
+    P::read_canonical_E(proof)
   }
 
   fn verify(_batch_verifier: Self::BatchVerifier) -> Result<(), Vec<dkg::Participant>> {

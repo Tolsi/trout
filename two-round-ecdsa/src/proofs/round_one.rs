@@ -1,11 +1,16 @@
-use std::io;
+use core::{marker::PhantomData, ops::Deref};
+use std::io::{self, Read, Write};
 
+use zeroize::Zeroizing;
 use rand_core::{RngCore, CryptoRng};
 
-use group::prime::PrimeGroup;
-use class_groups::{Element, Table};
+use group::{
+  ff::{Field, PrimeField},
+  Group, GroupEncoding,
+};
+use class_groups::{Element, Table, ClassGroup};
 
-use crate::UnsignedInteger;
+use crate::{UnsignedInteger, DigestReader, DigestWriter, Primes, Parameters};
 
 /// The proofs for the first round.
 ///
@@ -13,30 +18,29 @@ use crate::UnsignedInteger;
 /// `R_i = E \cdot nonce_i \and K_tilde_i = (\alpha_i \cdot G, \alpha_i \cdot Y + nonce_i \cdot H)`
 /// and `U_i = \beta_i \cdot G + u_i \cdot Y`: that `K_tilde_i` is the ciphertext of the nonce and
 /// `U_i` has a known opening.
-pub trait RoundOneProofs<E: PrimeGroup, CG: Element> {
+pub trait RoundOneProofs<CG: Element, P: Parameters<CG>> {
   /// The batch verifier for the round one proofs.
   type BatchVerifier;
 
   /// Prove the round one statements.
   ///
-  /// This uses `E::generator()`, where `E` is the generic type parameter, for `E`, the elliptic
-  /// curve generator from the academic notation.
+  /// This uses `P::E::generator()`, where `E` is the generic type parameter, for `E`, the elliptic
+  /// curve generator from the academic notation. This also uses `ClassGroup::f()` for `H`.
   ///
-  /// The provided context hash MUST be binding to `E, G, Y, H, R_i, K_tilde_i, U_i`. This allows
-  /// the proofs to not transcript these.
+  /// The provided transcript MUST already be binding to `E, G, Y, H, R_i, K_tilde_i, U_i`. This
+  /// allows the proofs to not transcript these.
   ///
-  /// If an error is returned, the state of `proof` is undefined.
-  fn prove(
+  /// If an error is returned, the state of `transcript` is undefined.
+  fn prove<W: io::Write>(
     rng: &mut (impl RngCore + CryptoRng),
-    context: [u8; 32],
+    class_group: &ClassGroup<CG>,
     G: &Table<CG>,
     Y: &Table<CG>,
-    H: &Table<CG>,
     alpha_i: &UnsignedInteger,
-    nonce_i: &E::Scalar,
+    nonce_i: &P::F,
     beta_i: &UnsignedInteger,
-    u_i: &E::Scalar,
-    proof: impl io::Write,
+    u_i: &P::F,
+    transcript: &mut DigestWriter<W>,
   ) -> io::Result<()>;
 
   /// Create a batch verifier of round one proofs.
@@ -44,23 +48,22 @@ pub trait RoundOneProofs<E: PrimeGroup, CG: Element> {
 
   /// Queue verification of someone's round one proofs.
   ///
-  /// This context must be the exact same as the prover used, causing the same bounds on what has
-  /// already been transcripted.
+  /// This transcript must be the exact same as the prover used, causing the same bounds on what
+  /// has already been transcripted.
   ///
-  /// If an error is returned, `proof` is left in an undefined state. The batch verifier is
+  /// If an error is returned, `transcript` is left in an undefined state. The batch verifier is
   /// guaranteed to not be mutated however, meaning a proof which raises an error while being
   /// queued will not corrupt the batch verifier and will leave it eligible to verify other proofs.
-  fn queue_verification(
+  fn queue_verification<R: io::Read>(
     batch_verifier: &mut Self::BatchVerifier,
     participant: dkg::Participant,
-    context: [u8; 32],
+    class_group: &ClassGroup<CG>,
     G: &Table<CG>,
     Y: &Table<CG>,
-    H: &Table<CG>,
-    R_i: E,
+    R_i: P::E,
     K_tilde_i: &(CG, CG),
     U_i: &CG,
-    proof: impl io::Read,
+    transcript: &mut DigestReader<R>,
   ) -> io::Result<()>;
 
   /// Verify all proofs within the batch verifier.
@@ -69,26 +72,133 @@ pub trait RoundOneProofs<E: PrimeGroup, CG: Element> {
   fn verify(batch_verifier: Self::BatchVerifier) -> Result<(), Vec<dkg::Participant>>;
 }
 
-/// No proofs for round one.
-///
-/// This is fundamentally insecure and will let any participant recover the private key.
-pub struct InsecureRoundOneProofs;
+const CCYKC_LAMBDA: u32 = 128;
 
-impl<E: PrimeGroup, CG: Element> RoundOneProofs<E, CG> for InsecureRoundOneProofs {
+/// Proofs from Cui, Chan, Yuen, Kang, and Chu's Bandwidth-Efficient Zero-Knowledge Proofs for
+/// Threshold ECDSA (2023).
+pub struct Ccykc2023RoundOne<CG: Element, P: Parameters<CG>, Pr: Primes>(PhantomData<(CG, P, Pr)>);
+impl<CG: Element, P: Parameters<CG>, Pr: Primes> RoundOneProofs<CG, P>
+  for Ccykc2023RoundOne<CG, P, Pr>
+{
   type BatchVerifier = ();
 
-  fn prove(
-    _rng: &mut (impl RngCore + CryptoRng),
-    _context: [u8; 32],
-    _G: &Table<CG>,
-    _Y: &Table<CG>,
-    _H: &Table<CG>,
-    _alpha_i: &UnsignedInteger,
-    _nonce_i: &E::Scalar,
-    _beta_i: &UnsignedInteger,
-    _u_i: &E::Scalar,
-    _proof: impl io::Write,
+  fn prove<W: io::Write>(
+    rng: &mut (impl RngCore + CryptoRng),
+    class_group: &ClassGroup<CG>,
+    G: &Table<CG>,
+    Y: &Table<CG>,
+    alpha_i: &UnsignedInteger,
+    nonce_i: &P::F,
+    beta_i: &UnsignedInteger,
+    u_i: &P::F,
+    transcript: &mut DigestWriter<W>,
   ) -> io::Result<()> {
+    const EPSILON_D: u32 = 128;
+    const B_CONST: u32 = EPSILON_D + CCYKC_LAMBDA + 2;
+    /*
+      The `1 +` is because the paper says to sample from `[-B, B]`. We sample from the equally
+      large range `[0, 2B] which should be as uniform since this is in-effect modulo the unknown
+      order bound (or a composite number where that's one of the factors), without needing to deal
+      with signed integers.
+
+      We technically don't sample from `[0, 2B]` yet `[0, 2**log_2(2B)]`. The verifier doesn't
+      require a certian bound, the prover doesn't lose completeness with such a bound, and this is
+      should still be as uniform since we our log_2 is rounding up. It's arguably slightly more
+      inefficient, due to the extra bit, yet avoids calculation of `B`.
+    */
+    let B = 1 + (B_CONST + P::F::NUM_BITS + class_group.unknown_order_bound());
+
+    // Algorithm 6 ZKPoKLog, to prove the integrity of `R_i, K_tilde_i`
+    // `s_p` according to the paper
+    let r_randomness = Zeroizing::new(UnsignedInteger::random(B, &mut *rng));
+    // `s_m` according to the paper
+    let r_message = Zeroizing::new(P::F::random(&mut *rng));
+    // Write $\hat{S}$ from the paper
+    transcript.write_all((P::E::generator() * r_message.deref()).to_bytes().as_ref())?;
+    // Write `S_2` from the paper
+    CG::mul(G, &Zeroizing::new(r_randomness.to_be_bytes())).compress(&mut *transcript)?;
+    // Write `S_1` from the paper
+    CG::mul(Y, &Zeroizing::new(r_randomness.to_be_bytes()))
+      .add(&CG::mul(class_group.f(), &Zeroizing::new(crate::be_bytes(r_message.deref()))))
+      .compress(&mut *transcript)?;
+
+    // Algorithm 1 ZKPoKRepS to prove the integrity of `U_i`
+    // `k_0` according to the paper
+    let k_beta_i = Zeroizing::new(UnsignedInteger::random(B, &mut *rng));
+    // `k_1` according to the paper
+    let k_u_i = Zeroizing::new(UnsignedInteger::random(B, &mut *rng));
+    // Write `R` from the paper
+    CG::mul(G, &Zeroizing::new(k_beta_i.to_be_bytes()))
+      .add(&CG::mul(Y, &Zeroizing::new(k_u_i.to_be_bytes())))
+      .compress(&mut *transcript)?;
+
+    // Sample a challenge for both proofs
+    // This is done as sampling the prime is presumed expensive, so reducing samples is appreciated
+    let c = P::from_xof(transcript.0.finalize_xof());
+    transcript.0.update(&[0]);
+    let prime = Pr::prime(CCYKC_LAMBDA, transcript.0.finalize_xof());
+
+    let c_uint = UnsignedInteger::from_be_slice(&crate::be_bytes(&c));
+    let modulus =
+      crypto_bigint::NonZero::new((&prime * &UnsignedInteger::from_be_slice(class_group.p())).0)
+        .unwrap();
+
+    let write_e = |transcript: &mut DigestWriter<W>, e: UnsignedInteger| {
+      let e_bytes = e.to_be_bytes();
+      // We can fix the encoded size to the size of the modulus, known to the prover and verifier
+      let e_expected_bytes = usize::try_from(modulus.bits().div_ceil(8)).unwrap();
+      // If our response is longer (due to `div_rem` not sufficiently shortening), only write the
+      // expected bytes. The cut-off bytes should all be zero as they're above the modulus.
+      let e_bytes = if e_expected_bytes <= e_bytes.len() {
+        &e_bytes[(e_bytes.len() - e_expected_bytes) ..]
+      } else {
+        // If our response is shorter, prefix the BE encoding with the proper amount of zero bytes
+        transcript.write_all(&vec![0; e_expected_bytes - e_bytes.len()])?;
+        &e_bytes
+      };
+      transcript.write_all(e_bytes)
+    };
+
+    // ZKPoKLog response
+    {
+      {
+        // `u_m` from the paper
+        let s_message = *r_message + Zeroizing::new(c * nonce_i).deref();
+        transcript.write_all(s_message.to_repr().as_ref())?;
+      }
+
+      // `u_p` from the paper
+      let s_randomness =
+        Zeroizing::new(r_randomness.deref() + Zeroizing::new(&c_uint * alpha_i).deref());
+      // `(d_p, e_p)` from the paper
+      let (d_randomness, e_randomness) = s_randomness.div_rem(&modulus);
+      // Write `D_2` from the paper
+      CG::mul(G, &d_randomness).compress(&mut *transcript)?;
+      // Write `D_1` from the paper
+      CG::mul(Y, &d_randomness).compress(&mut *transcript)?;
+      // Write `e_p` from the paper
+      write_e(&mut *transcript, e_randomness)?;
+    }
+
+    // ZKPoKRepS response
+    {
+      // `s_0` from the paper
+      let s_beta_i = Zeroizing::new(k_beta_i.deref() + Zeroizing::new(&c_uint * beta_i).deref());
+      // `s_1` from the paper
+      let u_i = Zeroizing::new(UnsignedInteger::from_be_slice(
+        Zeroizing::new(crate::be_bytes(u_i)).deref(),
+      ));
+      let s_u_i = Zeroizing::new(k_u_i.deref() + Zeroizing::new(&c_uint * u_i.deref()).deref());
+      let (d_beta_i, e_beta_i) = s_beta_i.div_rem(&modulus);
+      let (d_u_i, e_u_i) = s_u_i.div_rem(&modulus);
+      // Write `D` from the paper
+      CG::mul(G, &d_beta_i).add(&CG::mul(Y, &d_u_i)).compress(&mut *transcript)?;
+      // Write `e_0` from the paper
+      write_e(&mut *transcript, e_beta_i)?;
+      // Write `e_1` from the paper
+      write_e(&mut *transcript, e_u_i)?;
+    }
+
     Ok(())
   }
 
@@ -96,18 +206,145 @@ impl<E: PrimeGroup, CG: Element> RoundOneProofs<E, CG> for InsecureRoundOneProof
     ()
   }
 
-  fn queue_verification(
+  fn queue_verification<R: io::Read>(
     _batch_verifier: &mut Self::BatchVerifier,
     _participant: dkg::Participant,
-    _context: [u8; 32],
-    _G: &Table<CG>,
-    _Y: &Table<CG>,
-    _H: &Table<CG>,
-    _R_i: E,
-    _K_tilde_i: &(CG, CG),
-    _U_i: &CG,
-    _proof: impl io::Read,
+    class_group: &ClassGroup<CG>,
+    G: &Table<CG>,
+    Y: &Table<CG>,
+    R_i: P::E,
+    K_tilde_i: &(CG, CG),
+    U_i: &CG,
+    transcript: &mut DigestReader<R>,
   ) -> io::Result<()> {
+    // ZKPoKLog commitment
+    let R_message = P::read_canonical_E(&mut *transcript)?;
+    let R_randomness_commitment = class_group.decompress_p(&mut *transcript)?;
+    let R_ciphertext = class_group.decompress_p(&mut *transcript)?;
+
+    // ZKPoKRepS commitment
+    let R_U = class_group.decompress_p(&mut *transcript)?;
+
+    let c = P::from_xof(transcript.0.finalize_xof());
+    transcript.0.update(&[0]);
+    let prime = Pr::prime(CCYKC_LAMBDA, transcript.0.finalize_xof());
+
+    let c_uint = UnsignedInteger::from_be_slice(&crate::be_bytes(&c));
+    let modulus = (&prime * &UnsignedInteger::from_be_slice(class_group.p())).0;
+    let modulus_bytes = modulus.to_be_bytes();
+    let modulus = crypto_bigint::NonZero::new(modulus).unwrap();
+
+    let read_e = |transcript: &mut DigestReader<R>| -> io::Result<Vec<u8>> {
+      let mut e = vec![0; modulus.bits().div_ceil(8).try_into().unwrap()];
+      transcript.read_exact(&mut e)?;
+      let e_int = UnsignedInteger::from_be_slice(&e);
+      if e_int.0 > *modulus {
+        Err(io::Error::other("unreduced e"))?;
+      }
+      Ok(e)
+    };
+
+    // ZKPoKLog response
+    {
+      let mut s_message = <P::F as PrimeField>::Repr::default();
+      transcript.read_exact(s_message.as_mut())?;
+      let s_message = Option::<P::F>::from(P::F::from_repr(s_message))
+        .ok_or_else(|| io::Error::other("invalid s_message"))?;
+
+      if (P::E::generator() * s_message) != (R_message + (R_i * c)) {
+        Err(io::Error::other("R_i PoK was invalid"))?;
+      }
+
+      let D_randomness_commitment = class_group.decompress_p(&mut *transcript)?;
+      let D_ciphertext = class_group.decompress_p(&mut *transcript)?;
+      let e_randomness = read_e(&mut *transcript)?;
+
+      {
+        let lhs = CG::mul(
+          &Table::new_for_scalar_bits(
+            modulus.bits().try_into().unwrap(),
+            class_group.identity_p().clone(),
+            D_randomness_commitment,
+          ),
+          &modulus_bytes,
+        );
+        let lhs = lhs.add(&CG::mul(G, &e_randomness));
+
+        let rhs = CG::mul(
+          &Table::new_for_scalar_bits(
+            P::F::NUM_BITS.try_into().unwrap(),
+            class_group.identity_p().clone(),
+            K_tilde_i.0.clone(),
+          ),
+          &c_uint.to_be_bytes(),
+        );
+        let rhs = R_randomness_commitment.add(&rhs);
+
+        if lhs != rhs {
+          Err(io::Error::other("K_tilde_i.0 PoK was invalid"))?;
+        }
+      }
+
+      {
+        let lhs = CG::mul(
+          &Table::new_for_scalar_bits(
+            modulus.bits().try_into().unwrap(),
+            class_group.identity_p().clone(),
+            D_ciphertext,
+          ),
+          &modulus_bytes,
+        );
+        let lhs = lhs
+          .add(&CG::mul(Y, &e_randomness))
+          .add(&CG::mul(class_group.f(), &crate::be_bytes(&s_message)));
+
+        let rhs = CG::mul(
+          &Table::new_for_scalar_bits(
+            P::F::NUM_BITS.try_into().unwrap(),
+            class_group.identity_p().clone(),
+            K_tilde_i.1.clone(),
+          ),
+          &c_uint.to_be_bytes(),
+        );
+        let rhs = R_ciphertext.add(&rhs);
+
+        if lhs != rhs {
+          Err(io::Error::other("K_tilde_i.1 PoK was invalid"))?;
+        }
+      }
+    }
+
+    // ZKPoKRepS response
+    {
+      let D_U = class_group.decompress_p(&mut *transcript)?;
+      let e_beta_i = read_e(&mut *transcript)?;
+      let e_u_i = read_e(&mut *transcript)?;
+
+      let lhs = CG::mul(
+        &Table::new_for_scalar_bits(
+          modulus.bits().try_into().unwrap(),
+          class_group.identity_p().clone(),
+          D_U,
+        ),
+        &modulus_bytes,
+      );
+      let lhs = lhs.add(&CG::mul(G, &e_beta_i)).add(&CG::mul(Y, &e_u_i));
+
+      let rhs = CG::mul(
+        &Table::new_for_scalar_bits(
+          P::F::NUM_BITS.try_into().unwrap(),
+          class_group.identity_p().clone(),
+          U_i.clone(),
+        ),
+        &c_uint.to_be_bytes(),
+      );
+      let rhs = R_U.add(&rhs);
+
+      if lhs != rhs {
+        Err(io::Error::other("U_i PoK was invalid"))?;
+      }
+    }
+
     Ok(())
   }
 

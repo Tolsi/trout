@@ -195,13 +195,11 @@ impl<CG: Element, P: Parameters<CG>> SigningProtocol<CG, P> {
         (beta_i, u_i)
       };
 
-      let round_one_context = context(&mut message.0);
       P::RoundOneProofs::prove(
         &mut *rng,
-        round_one_context,
+        setup.view().class_group(),
         setup.view().G(),
         setup.view().Y(),
-        setup.view().class_group().f(),
         &alpha_i,
         &nonce_i,
         &beta_i,
@@ -344,14 +342,12 @@ impl<CG: Element, P: Parameters<CG>> Observing<CG, P> {
           continue;
         };
 
-        let round_one_context = context(&mut message.0);
         let Ok(()) = P::RoundOneProofs::queue_verification(
           &mut round_one_batch_verifier,
           participant,
-          round_one_context,
+          self.setup.class_group(),
           self.setup.G(),
           self.setup.Y(),
-          self.setup.class_group().f(),
           R_i,
           &K_tilde_i,
           &U_i,
@@ -563,7 +559,7 @@ impl<CG: Element, P: Parameters<CG>> ObservingSigning<CG, P> {
     // Again, not transcripted as deterministic (and therefore already bound) to the transcript
     let Z_tilde = (
       r_C_tilde.0,
-      CG::mul(&self.setup.class_group().f(), &crate::be_bytes(&message_hash)).add(&r_C_tilde.1),
+      CG::mul(self.setup.class_group().f(), &crate::be_bytes(&message_hash)).add(&r_C_tilde.1),
     );
     let Z_tilde = table_scaled_decryption_ciphertext::<CG, P>(self.setup.class_group(), Z_tilde);
 
@@ -601,7 +597,7 @@ impl<CG: Element, P: Parameters<CG>> Signing<CG, P> {
     ) -> CG {
       // TODO: Calculate this with a multiexp
       let C_tilde_i_1 = CG::mul(&A_tilde.1, &Zeroizing::new(crate::be_bytes(b_i)));
-      let F_i = CG::mul(&B, &Zeroizing::new(alpha_i.to_be_bytes()))
+      let F_i = CG::mul(B, &Zeroizing::new(alpha_i.to_be_bytes()))
         .sub(CG::mul(&A_tilde.0, &Zeroizing::new(beta_i.to_be_bytes())));
       C_tilde_i_1.sub(F_i)
     }

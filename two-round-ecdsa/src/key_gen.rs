@@ -64,11 +64,29 @@ fn class_group<CG: Element, P: Parameters<CG>>(
     p_bytes
   };
 
-  let class_group = ClassGroup::<CG>::setup(&mut class_group_rng, lambda, &p_bytes).unwrap();
-  let G =
-    Table::new(10, class_group.identity_p().clone(), class_group.generator_p(&mut class_group_rng));
-  let Y =
-    Table::new(10, class_group.identity_p().clone(), class_group.generator_p(&mut class_group_rng));
+  let class_group = ClassGroup::<CG>::setup(&mut class_group_rng, lambda, p_bytes.clone()).unwrap();
+  let G = class_group.generator_p(&mut class_group_rng);
+  // Ensure G is a generator of G_q, not G, as required by the CCYKC proofs
+  let G = CG::mul(
+    &Table::new_for_scalar_bits(
+      P::F::NUM_BITS.try_into().unwrap(),
+      class_group.identity_p().clone(),
+      G,
+    ),
+    &p_bytes,
+  );
+  let G = Table::new(10, class_group.identity_p().clone(), G);
+
+  let Y = class_group.generator_p(&mut class_group_rng);
+  let Y = CG::mul(
+    &Table::new_for_scalar_bits(
+      P::F::NUM_BITS.try_into().unwrap(),
+      class_group.identity_p().clone(),
+      Y,
+    ),
+    &p_bytes,
+  );
+  let Y = Table::new(10, class_group.identity_p().clone(), Y);
   (class_group, G, Y)
 }
 
@@ -82,7 +100,7 @@ pub struct SetupView<CG: Element, P: Parameters<CG>> {
   Y: Table<CG>,
   verification_key: P::E,
   // verification_shares: HashMap<Participant, P::E>,
-  evrf_setups: HashMap<Participant, <P::Evrf as Evrf<P::E>>::SetupView>,
+  evrf_setups: HashMap<Participant, <P::Evrf as Evrf<CG, P>>::SetupView>,
   share_ciphertexts: HashMap<Participant, (Table<CG>, Table<CG>)>,
 
   // The transcript of this view
@@ -97,7 +115,7 @@ impl<CG: Element, P: Parameters<CG>> SetupView<CG, P> {
     class_group_seed: [u8; 32],
     security_level: SecurityLevel,
     verification_key: P::E,
-    evrf_setups: HashMap<Participant, <P::Evrf as Evrf<P::E>>::SetupView>,
+    evrf_setups: HashMap<Participant, <P::Evrf as Evrf<CG, P>>::SetupView>,
     share_ciphertexts: HashMap<Participant, (CG, CG)>,
   ) -> Self {
     assert_eq!(evrf_setups.len(), share_ciphertexts.len());
@@ -182,7 +200,7 @@ impl<CG: Element, P: Parameters<CG>> SetupView<CG, P> {
   pub(crate) fn evrf_setup(
     &self,
     participant: &Participant,
-  ) -> Option<&<P::Evrf as Evrf<P::E>>::SetupView> {
+  ) -> Option<&<P::Evrf as Evrf<CG, P>>::SetupView> {
     self.evrf_setups.get(participant)
   }
   pub(crate) fn share_ciphertext(
@@ -202,7 +220,7 @@ impl<CG: Element, P: Parameters<CG>> SetupView<CG, P> {
 pub struct Setup<CG: Element, P: Parameters<CG>> {
   view: Arc<SetupView<CG, P>>,
   i: Participant,
-  evrf_setup: <P::Evrf as Evrf<P::E>>::Setup,
+  evrf_setup: <P::Evrf as Evrf<CG, P>>::Setup,
   share_ciphertext_opening: Zeroizing<(UnsignedInteger, P::F)>,
 }
 
@@ -218,7 +236,7 @@ impl<CG: Element, P: Parameters<CG>> Setup<CG, P> {
   }
 
   /// Our eVRF setup.
-  pub(crate) fn evrf_setup(&self) -> &<P::Evrf as Evrf<P::E>>::Setup {
+  pub(crate) fn evrf_setup(&self) -> &<P::Evrf as Evrf<CG, P>>::Setup {
     &self.evrf_setup
   }
 

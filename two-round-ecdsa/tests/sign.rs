@@ -5,7 +5,12 @@ use two_round_ecdsa::{SecurityLevel, Setup, SigningProtocol, Ready};
 
 #[test]
 fn sign() {
-  let mut setups = Setup::<MalachiteElement, two_round_ecdsa::Secp256k1<_>>::dealer(
+  #[cfg(not(feature = "gmp"))]
+  type Primes = two_round_ecdsa::CryptoPrimesStackCcyck;
+  #[cfg(feature = "gmp")]
+  type Primes = two_round_ecdsa::GmpPrimes;
+
+  let mut setups = Setup::<MalachiteElement, two_round_ecdsa::Secp256k1<_, Primes>>::dealer(
     &mut OsRng,
     SecurityLevel::Insecure,
     2,
@@ -20,9 +25,13 @@ fn sign() {
   let second = setups.remove(&second_i).unwrap();
 
   let (first, first_message) =
-    SigningProtocol::<_, two_round_ecdsa::Secp256k1<_>>::participate(&mut OsRng, first, [0; 32]);
+    SigningProtocol::<_, two_round_ecdsa::Secp256k1<_, Primes>>::participate(
+      &mut OsRng, first, [0; 32],
+    );
   let (second, second_message) =
-    SigningProtocol::<_, two_round_ecdsa::Secp256k1<_>>::participate(&mut OsRng, second, [0; 32]);
+    SigningProtocol::<_, two_round_ecdsa::Secp256k1<_, Primes>>::participate(
+      &mut OsRng, second, [0; 32],
+    );
   println!("Participated!");
 
   let Ready::Ready(first) = first.accumulate(second_i, second_message) else { panic!() };
