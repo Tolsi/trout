@@ -3,12 +3,12 @@ use core::ops::{Add, Mul};
 use zeroize::{Zeroize, Zeroizing};
 use rand_core::{RngCore, CryptoRng};
 
-use crypto_bigint::BoxedUint;
+use crypto_bigint::{NonZero, BoxedUint};
 
 /// A constant-time variable-size (dynamically-allocated) unsigned integer.
 // This wraps BoxedUint with a type which re-allocates as necessary to ensure it never wraps.
 #[derive(Clone, Zeroize)]
-pub struct UnsignedInteger(BoxedUint);
+pub struct UnsignedInteger(pub(crate) BoxedUint);
 
 impl UnsignedInteger {
   #[must_use]
@@ -32,15 +32,23 @@ impl UnsignedInteger {
     }
     Self(BoxedUint::from_be_slice(&bytes, bits).unwrap())
   }
+
+  #[must_use]
+  pub(crate) fn div_rem(&self, denominator: &NonZero<BoxedUint>) -> (Zeroizing<Box<[u8]>>, Self) {
+    let denominator = denominator.widen(self.0.bits_precision());
+    let (d, e) = self.0.div_rem(&denominator);
+    let d = Zeroizing::new(d);
+    let d = Zeroizing::new(d.to_be_bytes());
+    (d, Self(e))
+  }
 }
 
 impl Add for &UnsignedInteger {
   type Output = UnsignedInteger;
   fn add(self, other: Self) -> UnsignedInteger {
     let new_precision = self.0.bits_precision().max(other.0.bits_precision()) + 1;
-    let mut res = self.0.widen(new_precision);
-    res += &other.0;
-    UnsignedInteger(res)
+    let res = self.0.widen(new_precision);
+    UnsignedInteger(&other.0 + res)
   }
 }
 
