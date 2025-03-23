@@ -66,7 +66,6 @@ impl crate::Element for GmpElement {
     let L = &self.L;
 
     let (d1, u, v) = self.b.clone().extended_gcd(self.a.clone(), Integer::new());
-    let d1: Integer = d1.into();
     debug_assert_eq!((u.clone() * &self.b) + (v.clone() * &self.a), d1);
     let A = self.a.clone() / &d1;
     let B = self.b.clone() / &d1;
@@ -114,9 +113,9 @@ impl crate::Element for GmpElement {
     let g = ((e.clone() * &v2) - &B) / &v;
     let mut b2 = (e.clone() * &v2) + (v.clone() * &g);
     if d1 > *Integer::ONE {
-      b2 = b2 * &d1;
-      v = v * &d1;
-      v2 = v2 * &d1;
+      b2 *= &d1;
+      v *= &d1;
+      v2 *= &d1;
     }
     let a2 = d.clone() * &d;
     let c2 = v3.clone().square();
@@ -142,8 +141,7 @@ impl crate::Element for GmpElement {
     let mut s = (f1.b.clone() + &f2.b) >> 1u32;
     let n = f2.b.clone() - &s;
 
-    let (d, u, v) = f2.a.clone().extended_gcd(f1.a.clone(), Integer::new());
-    let mut d: Integer = d.into();
+    let (mut d, u, v) = f2.a.clone().extended_gcd(f1.a.clone(), Integer::new());
     debug_assert_eq!((u.clone() * &f2.a) + (v.clone() * &f1.a), d);
 
     let mut a1 = f1.a.clone();
@@ -162,7 +160,6 @@ impl crate::Element for GmpElement {
       (A, d1)
     } else {
       let (d1, u1, _) = s.clone().extended_gcd(d.clone(), Integer::new());
-      let d1: Integer = d1.into();
       if d1 > *Integer::ONE {
         a1 /= &d1;
         a2 /= &d1;

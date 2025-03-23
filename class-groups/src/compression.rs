@@ -51,7 +51,7 @@ pub(crate) fn partial_xgcd(a: Natural, b: Natural) -> (Natural, Integer) {
   // But `s` won't be negative, only `t` may be
   debug_assert!(s.sign() != Ordering::Less);
   let s = s.unsigned_abs();
-  debug_assert!(&s < &a_sqrt);
+  debug_assert!(s < a_sqrt);
   debug_assert_eq!(&s % &a, {
     let product = Integer::from(b.clone()) * &t;
     let candidate = product.unsigned_abs_ref() % &a;
@@ -188,11 +188,9 @@ pub(crate) fn read_varint(
 pub(crate) fn read_number(mut reader: impl io::Read, len: usize) -> io::Result<Natural> {
   let mut num = vec![0xff; len];
   reader.read_exact(&mut num)?;
-  for b in &num {
+  if let Some(b) = num.first() {
     if *b == 0 {
       return Err(io::Error::other("non-canonical bignum"));
-    } else {
-      break;
     }
   }
   Ok(natural_from_bytes(&num))
@@ -245,11 +243,13 @@ fn varint_encoding() {
   }
 
   // Test with a short first byte
+  #[allow(clippy::unusual_byte_groupings)]
   {
     let mut bytes = vec![];
     write_varint(&mut bytes, 0b111111 << 2, 2, 1).unwrap();
     assert_eq!(bytes, vec![0b111111_01]);
   }
+  #[allow(clippy::unusual_byte_groupings)]
   {
     let mut bytes = vec![];
     write_varint(&mut bytes, 0b111111 << 2, 2, 2).unwrap();

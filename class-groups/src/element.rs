@@ -131,7 +131,7 @@ pub trait Element:
       (Natural::ONE, a, Integer::ZERO, Natural::ZERO)
     } else if b == 0 {
       // Since `b >= 0`, `epsilon == 0` as expected
-      (Natural::from(a), Natural::ZERO, Integer::ZERO, Natural::ZERO)
+      (a, Natural::ZERO, Integer::ZERO, Natural::ZERO)
     } else {
       let (s, t) = compression::partial_xgcd(a.clone(), b.clone());
       // Calculate the positive GCD of a, t
@@ -172,7 +172,7 @@ pub struct Table<E: Element>(usize, Vec<E>);
 impl<E: Element> Table<E> {
   /// Create a new table.
   pub fn new(bits: u32, identity: E, element: E) -> Self {
-    let bits = bits.max(1).min(16);
+    let bits = bits.clamp(1, 16);
     let len = 2usize.pow(bits);
     let mut res = Vec::with_capacity(len);
     res.push(identity);

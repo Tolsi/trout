@@ -61,6 +61,7 @@ fn element<E: Element>(
 pub struct ClassGroup<E: Element = MalachiteElement> {
   B: Natural,
   p: Natural,
+  p_be_bytes: Vec<u8>,
   // TODO identity_k: E,
   identity_p: E,
   f_table: Table<E>,
@@ -83,9 +84,9 @@ impl<E: Element> ClassGroup<E> {
   pub fn setup(
     rng: &mut (impl RngCore + CryptoRng),
     lambda: u64,
-    p_be_bytes: &[u8],
+    p_be_bytes: Vec<u8>,
   ) -> Option<Self> {
-    let p = natural_from_bytes(p_be_bytes);
+    let p = natural_from_bytes(&p_be_bytes);
 
     let mu = p.significant_bits();
 
@@ -156,6 +157,7 @@ impl<E: Element> ClassGroup<E> {
 
     Some(ClassGroup {
       B,
+      p_be_bytes,
       p,
       identity_p: identity_p.clone(),
       // Make a very large table for this as it's static to the setup
@@ -163,6 +165,11 @@ impl<E: Element> ClassGroup<E> {
       delta_p,
       tess_root_p,
     })
+  }
+
+  /// The prime-order of the subgroup where the discrete log problem is easy.
+  pub fn p(&self) -> &[u8] {
+    &self.p_be_bytes
   }
 
   /// The bound on the unknown order, in bits.
@@ -199,7 +206,7 @@ impl<E: Element> ClassGroup<E> {
       }
       // Select `r` where `r` is congruent to 3 mod 4 to simplify the sqrt calculation
       // This does bias the choice of `r` by a couple of bits
-      if (&r % Natural::from(4u8)) != Natural::from(3u8) {
+      if (&r % Natural::from(4u8)) != 3u8 {
         continue;
       }
       // Ensure `delta_p` has a square root mod `r`
@@ -296,7 +303,7 @@ impl<E: Element> ClassGroup<E> {
     // Step 4
     let x = {
       let a_int = Integer::from(a.clone());
-      if &a_int == &Integer::ZERO {
+      if a_int == Integer::ZERO {
         Err(io::Error::other("a was not a valid modulus"))?;
       }
       let x = (&t * &t * &self.delta_p) % &a_int;
@@ -305,7 +312,7 @@ impl<E: Element> ClassGroup<E> {
     // Step 5
     let Some(s) = x.checked_sqrt() else { Err(io::Error::other("no x sqrt"))? };
     // Step 6
-    if &g == &Natural::ZERO {
+    if g == Natural::ZERO {
       Err(io::Error::other("g was zero"))?;
     }
     let (s_, s_g_rem) = s.div_mod(&g);
@@ -315,7 +322,7 @@ impl<E: Element> ClassGroup<E> {
     // Step 7
     let b_ = {
       let a_int = Integer::from(a_.clone());
-      if &a_int == &Integer::ZERO {
+      if a_int == Integer::ZERO {
         Err(io::Error::other("a' was not a valid modulus"))?;
       }
       let t_ = &t_ % &a_int;
@@ -382,7 +389,7 @@ impl<E: Element> ClassGroup<E> {
 #[test]
 fn class_group() {
   let prime = 19;
-  let cg = ClassGroup::<MalachiteElement>::setup(&mut rand_core::OsRng, 100, &[prime]).unwrap();
+  let cg = ClassGroup::<MalachiteElement>::setup(&mut rand_core::OsRng, 100, vec![prime]).unwrap();
 
   // Do some complete-ness tests regarding identity
   assert_eq!(&cg.identity_p.double(), &cg.identity_p);
