@@ -1,6 +1,10 @@
 use core::marker::PhantomData;
 use std::io;
 
+use class_groups::{Element, ClassGroup};
+
+use crate::UnsignedInteger;
+
 mod evrf;
 pub use evrf::*;
 
@@ -9,8 +13,6 @@ pub use round_one::*;
 
 mod round_two;
 pub use round_two::*;
-
-use crate::UnsignedInteger;
 
 /*
   Reader/Writer which transcripts what they read/write. The Reader avoids the read, decompress,
@@ -184,3 +186,60 @@ mod gmp_primes {
 }
 #[cfg(feature = "gmp")]
 pub use gmp_primes::*;
+
+pub(crate) mod ccykc {
+  use std::io::{self, Read, Write};
+
+  use super::*;
+
+  pub(crate) const LAMBDA: u32 = 128;
+  const EPSILON_D: u32 = 128;
+  const B_CONST: u32 = EPSILON_D + LAMBDA + 2;
+  pub(crate) fn B<F: group::ff::PrimeField, CG: Element>(class_group: &ClassGroup<CG>) -> u32 {
+    /*
+      The `1 +` is because the paper says to sample from `[-B, B]`. We sample from the equally
+      large range `[0, 2B] which should be as uniform since this is in-effect modulo the unknown
+      order bound (or a composite number where that's one of the factors), without needing to deal
+      with signed integers.
+
+      We technically don't sample from `[0, 2B]` yet `[0, 2**log_2(2B)]`. The verifier doesn't
+      require a certian bound, the prover doesn't lose completeness with such a bound, and this is
+      should still be as uniform since we our log_2 is rounding up. It's arguably slightly more
+      inefficient, due to the extra bit, yet avoids calculation of `B`.
+    */
+    1 + (B_CONST + F::NUM_BITS + class_group.unknown_order_bound())
+  }
+
+  pub(crate) fn write_e<W: Write>(
+    transcript: &mut DigestWriter<W>,
+    modulus: &crypto_bigint::NonZero<crypto_bigint::BoxedUint>,
+    e: UnsignedInteger,
+  ) -> io::Result<()> {
+    let e_bytes = e.to_be_bytes();
+    // We can fix the encoded size to the size of the modulus, known to the prover and verifier
+    let e_expected_bytes = usize::try_from(modulus.bits().div_ceil(8)).unwrap();
+    // If our response is longer (due to `div_rem` not sufficiently shortening), only write the
+    // expected bytes. The cut-off bytes should all be zero as they're above the modulus.
+    let e_bytes = if e_expected_bytes <= e_bytes.len() {
+      &e_bytes[(e_bytes.len() - e_expected_bytes) ..]
+    } else {
+      // If our response is shorter, prefix the BE encoding with the proper amount of zero bytes
+      transcript.write_all(&vec![0; e_expected_bytes - e_bytes.len()])?;
+      &e_bytes
+    };
+    transcript.write_all(e_bytes)
+  }
+
+  pub(crate) fn read_e<R: Read>(
+    transcript: &mut DigestReader<R>,
+    modulus: &crypto_bigint::NonZero<crypto_bigint::BoxedUint>,
+  ) -> io::Result<Vec<u8>> {
+    let mut e = vec![0; modulus.bits().div_ceil(8).try_into().unwrap()];
+    transcript.read_exact(&mut e)?;
+    let e_int = UnsignedInteger::from_be_slice(&e);
+    if e_int.0 > **modulus {
+      Err(io::Error::other("unreduced e"))?;
+    }
+    Ok(e)
+  }
+}

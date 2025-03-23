@@ -72,14 +72,10 @@ pub trait RoundOneProofs<CG: Element, P: Parameters<CG>> {
   fn verify(batch_verifier: Self::BatchVerifier) -> Result<(), Vec<dkg::Participant>>;
 }
 
-const CCYKC_LAMBDA: u32 = 128;
-
 /// Proofs from Cui, Chan, Yuen, Kang, and Chu's Bandwidth-Efficient Zero-Knowledge Proofs for
 /// Threshold ECDSA (2023).
-pub struct Ccykc2023RoundOne<CG: Element, P: Parameters<CG>, Pr: Primes>(PhantomData<(CG, P, Pr)>);
-impl<CG: Element, P: Parameters<CG>, Pr: Primes> RoundOneProofs<CG, P>
-  for Ccykc2023RoundOne<CG, P, Pr>
-{
+pub struct Ccykc2023RoundOne<Pr: Primes>(PhantomData<Pr>);
+impl<CG: Element, P: Parameters<CG>, Pr: Primes> RoundOneProofs<CG, P> for Ccykc2023RoundOne<Pr> {
   type BatchVerifier = ();
 
   fn prove<W: io::Write>(
@@ -93,20 +89,7 @@ impl<CG: Element, P: Parameters<CG>, Pr: Primes> RoundOneProofs<CG, P>
     u_i: &P::F,
     transcript: &mut DigestWriter<W>,
   ) -> io::Result<()> {
-    const EPSILON_D: u32 = 128;
-    const B_CONST: u32 = EPSILON_D + CCYKC_LAMBDA + 2;
-    /*
-      The `1 +` is because the paper says to sample from `[-B, B]`. We sample from the equally
-      large range `[0, 2B] which should be as uniform since this is in-effect modulo the unknown
-      order bound (or a composite number where that's one of the factors), without needing to deal
-      with signed integers.
-
-      We technically don't sample from `[0, 2B]` yet `[0, 2**log_2(2B)]`. The verifier doesn't
-      require a certian bound, the prover doesn't lose completeness with such a bound, and this is
-      should still be as uniform since we our log_2 is rounding up. It's arguably slightly more
-      inefficient, due to the extra bit, yet avoids calculation of `B`.
-    */
-    let B = 1 + (B_CONST + P::F::NUM_BITS + class_group.unknown_order_bound());
+    let B = crate::ccykc::B::<P::F, _>(class_group);
 
     // Algorithm 6 ZKPoKLog, to prove the integrity of `R_i, K_tilde_i`
     // `s_p` according to the paper
@@ -136,28 +119,12 @@ impl<CG: Element, P: Parameters<CG>, Pr: Primes> RoundOneProofs<CG, P>
     // This is done as sampling the prime is presumed expensive, so reducing samples is appreciated
     let c = P::from_xof(transcript.0.finalize_xof());
     transcript.0.update(&[0]);
-    let prime = Pr::prime(CCYKC_LAMBDA, transcript.0.finalize_xof());
+    let prime = Pr::prime(crate::ccykc::LAMBDA, transcript.0.finalize_xof());
 
     let c_uint = UnsignedInteger::from_be_slice(&crate::be_bytes(&c));
     let modulus =
       crypto_bigint::NonZero::new((&prime * &UnsignedInteger::from_be_slice(class_group.p())).0)
         .unwrap();
-
-    let write_e = |transcript: &mut DigestWriter<W>, e: UnsignedInteger| {
-      let e_bytes = e.to_be_bytes();
-      // We can fix the encoded size to the size of the modulus, known to the prover and verifier
-      let e_expected_bytes = usize::try_from(modulus.bits().div_ceil(8)).unwrap();
-      // If our response is longer (due to `div_rem` not sufficiently shortening), only write the
-      // expected bytes. The cut-off bytes should all be zero as they're above the modulus.
-      let e_bytes = if e_expected_bytes <= e_bytes.len() {
-        &e_bytes[(e_bytes.len() - e_expected_bytes) ..]
-      } else {
-        // If our response is shorter, prefix the BE encoding with the proper amount of zero bytes
-        transcript.write_all(&vec![0; e_expected_bytes - e_bytes.len()])?;
-        &e_bytes
-      };
-      transcript.write_all(e_bytes)
-    };
 
     // ZKPoKLog response
     {
@@ -177,7 +144,7 @@ impl<CG: Element, P: Parameters<CG>, Pr: Primes> RoundOneProofs<CG, P>
       // Write `D_1` from the paper
       CG::mul(Y, &d_randomness).compress(&mut *transcript)?;
       // Write `e_p` from the paper
-      write_e(&mut *transcript, e_randomness)?;
+      crate::ccykc::write_e(&mut *transcript, &modulus, e_randomness)?;
     }
 
     // ZKPoKRepS response
@@ -194,9 +161,9 @@ impl<CG: Element, P: Parameters<CG>, Pr: Primes> RoundOneProofs<CG, P>
       // Write `D` from the paper
       CG::mul(G, &d_beta_i).add(&CG::mul(Y, &d_u_i)).compress(&mut *transcript)?;
       // Write `e_0` from the paper
-      write_e(&mut *transcript, e_beta_i)?;
+      crate::ccykc::write_e(&mut *transcript, &modulus, e_beta_i)?;
       // Write `e_1` from the paper
-      write_e(&mut *transcript, e_u_i)?;
+      crate::ccykc::write_e(&mut *transcript, &modulus, e_u_i)?;
     }
 
     Ok(())
@@ -227,22 +194,12 @@ impl<CG: Element, P: Parameters<CG>, Pr: Primes> RoundOneProofs<CG, P>
 
     let c = P::from_xof(transcript.0.finalize_xof());
     transcript.0.update(&[0]);
-    let prime = Pr::prime(CCYKC_LAMBDA, transcript.0.finalize_xof());
+    let prime = Pr::prime(crate::ccykc::LAMBDA, transcript.0.finalize_xof());
 
     let c_uint = UnsignedInteger::from_be_slice(&crate::be_bytes(&c));
     let modulus = (&prime * &UnsignedInteger::from_be_slice(class_group.p())).0;
     let modulus_bytes = modulus.to_be_bytes();
     let modulus = crypto_bigint::NonZero::new(modulus).unwrap();
-
-    let read_e = |transcript: &mut DigestReader<R>| -> io::Result<Vec<u8>> {
-      let mut e = vec![0; modulus.bits().div_ceil(8).try_into().unwrap()];
-      transcript.read_exact(&mut e)?;
-      let e_int = UnsignedInteger::from_be_slice(&e);
-      if e_int.0 > *modulus {
-        Err(io::Error::other("unreduced e"))?;
-      }
-      Ok(e)
-    };
 
     // ZKPoKLog response
     {
@@ -257,7 +214,7 @@ impl<CG: Element, P: Parameters<CG>, Pr: Primes> RoundOneProofs<CG, P>
 
       let D_randomness_commitment = class_group.decompress_p(&mut *transcript)?;
       let D_ciphertext = class_group.decompress_p(&mut *transcript)?;
-      let e_randomness = read_e(&mut *transcript)?;
+      let e_randomness = crate::ccykc::read_e(&mut *transcript, &modulus)?;
 
       {
         let lhs = CG::mul(
@@ -317,8 +274,8 @@ impl<CG: Element, P: Parameters<CG>, Pr: Primes> RoundOneProofs<CG, P>
     // ZKPoKRepS response
     {
       let D_U = class_group.decompress_p(&mut *transcript)?;
-      let e_beta_i = read_e(&mut *transcript)?;
-      let e_u_i = read_e(&mut *transcript)?;
+      let e_beta_i = crate::ccykc::read_e(&mut *transcript, &modulus)?;
+      let e_u_i = crate::ccykc::read_e(&mut *transcript, &modulus)?;
 
       let lhs = CG::mul(
         &Table::new_for_scalar_bits(

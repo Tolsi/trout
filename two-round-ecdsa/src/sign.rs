@@ -146,7 +146,12 @@ impl<CG: Element, P: Parameters<CG>> SigningProtocol<CG, P> {
     let mut observing = Self::observe(setup.view().clone(), session_id);
 
     // Participate in it
-    let mut message = Vec::with_capacity(32 + 768 + (3 * 384));
+    const EVRF_SIZE_ESTIMATE: usize = 32 + 768;
+    const PROTOCOL_ELEMENTS_SIZE_ESTIMATE: usize = 3 * 384;
+    const CLASS_GROUPS_PROOF_SIZE_ESTIMATE: usize = (6 * 384) + 32 + (2 * 64);
+    let mut message = Vec::with_capacity(
+      EVRF_SIZE_ESTIMATE + PROTOCOL_ELEMENTS_SIZE_ESTIMATE + CLASS_GROUPS_PROOF_SIZE_ESTIMATE,
+    );
     let (alpha_i, beta_i, u_i) = {
       let mut message = DigestWriter(observing.transcript.clone(), &mut message);
 
@@ -603,48 +608,50 @@ impl<CG: Element, P: Parameters<CG>> Signing<CG, P> {
       C_tilde_i_1.sub(F_i)
     }
 
-    let mut message = Vec::with_capacity(2 * 384);
-    let mut transcript = {
-      let mut message =
-        DigestWriter(aggregating.observing_signing.transcript.clone(), &mut message);
-      // (H(m) + rx) * u
-      scaled_decryption::<CG, P>(
-        &aggregating.Z_tilde,
-        &aggregating.observing_signing.U,
-        &Zeroizing::new(
-          self.setup.share_ciphertext_opening() *
-            &(&UnsignedInteger::from_be_slice(&crate::be_bytes(&aggregating.x_coordinate)) *
-              &UnsignedInteger::from_be_slice(&crate::be_bytes(
-                &aggregating.observing_signing.lagrange_coefficients[&self.setup.i()],
-              ))),
-        ),
-        &self.beta_i,
-        &self.u_i,
-      )
-      .compress(&mut message)
-      .unwrap();
-      // k * u
-      scaled_decryption::<CG, P>(
-        &aggregating.observing_signing.K_tilde,
-        &aggregating.observing_signing.U,
-        &self.alpha_i,
-        &self.beta_i,
-        &self.u_i,
-      )
-      .compress(&mut message)
-      .unwrap();
-      message.0
-    };
+    const PROTOCOL_ELEMENTS_SIZE_ESTIMATE: usize = 2 * 384;
+    const CLASS_GROUPS_PROOF_SIZE_ESTIMATE: usize = (10 * 384) + (4 * 64);
+    let message =
+      Vec::with_capacity(PROTOCOL_ELEMENTS_SIZE_ESTIMATE + CLASS_GROUPS_PROOF_SIZE_ESTIMATE);
+    let mut message = DigestWriter(aggregating.observing_signing.transcript.clone(), message);
 
-    let round_two_proofs_context = context(&mut transcript);
+    let delta_i = Zeroizing::new(
+      self.setup.share_ciphertext_opening() *
+        &(&UnsignedInteger::from_be_slice(&crate::be_bytes(&aggregating.x_coordinate)) *
+          &UnsignedInteger::from_be_slice(&crate::be_bytes(
+            &aggregating.observing_signing.lagrange_coefficients[&self.setup.i()],
+          ))),
+    );
+
+    // (H(m) + rx) * u
+    scaled_decryption::<CG, P>(
+      &aggregating.Z_tilde,
+      &aggregating.observing_signing.U,
+      &delta_i,
+      &self.beta_i,
+      &self.u_i,
+    )
+    .compress(&mut message)
+    .unwrap();
+    // k * u
+    scaled_decryption::<CG, P>(
+      &aggregating.observing_signing.K_tilde,
+      &aggregating.observing_signing.U,
+      &self.alpha_i,
+      &self.beta_i,
+      &self.u_i,
+    )
+    .compress(&mut message)
+    .unwrap();
+
     P::RoundTwoProofs::prove(
       rng,
-      round_two_proofs_context,
+      self.setup.view().class_group(),
       self.setup.view().G(),
       self.setup.view().Y(),
       &aggregating.Z_tilde,
       &aggregating.observing_signing.K_tilde,
       &aggregating.observing_signing.U,
+      &delta_i,
       &self.alpha_i,
       &self.beta_i,
       &self.u_i,
@@ -653,7 +660,7 @@ impl<CG: Element, P: Parameters<CG>> Signing<CG, P> {
     .unwrap();
 
     // Because this is the view if we're participating, accumulate our own signature share
-    match aggregating.aggregate(self.setup.i(), message.clone()) {
+    match aggregating.aggregate(self.setup.i(), message.1.clone()) {
       Ready::Ready(_) => unreachable!("t == 1 barred at setup"),
       Ready::NotReady((aggregating_, error)) => {
         aggregating = aggregating_;
@@ -661,7 +668,7 @@ impl<CG: Element, P: Parameters<CG>> Signing<CG, P> {
       }
     }
 
-    (aggregating, message)
+    (aggregating, message.1)
   }
 }
 
@@ -728,7 +735,8 @@ impl<CG: Element, P: Parameters<CG>> Aggregating<CG, P> {
       let mut KU: Option<CG> = None;
       let mut messages = HashMap::new();
       for (participant, message) in self.pending.drain() {
-        let message = message.as_slice();
+        // We use a Cursor so this isn't `&mut &[u8]` yet a fully owned object
+        let message = std::io::Cursor::new(message);
         let mut message = DigestReader(self.observing_signing.transcript.clone(), message);
 
         let Ok(ZU_i) = setup.class_group().decompress_p(&mut message) else {
@@ -742,7 +750,7 @@ impl<CG: Element, P: Parameters<CG>> Aggregating<CG, P> {
 
         ZU = ZU.map(|ZU| ZU.add(&ZU_i)).or(Some(ZU_i.clone()));
         KU = KU.map(|KU| KU.add(&KU_i)).or(Some(KU_i.clone()));
-        messages.insert(participant, (message.0, ZU_i, KU_i, message.1.to_vec()));
+        messages.insert(participant, (message, ZU_i, KU_i));
       }
 
       if faulty.is_empty() {
@@ -781,8 +789,7 @@ impl<CG: Element, P: Parameters<CG>> Aggregating<CG, P> {
       }
 
       // Verify the proofs to identify any other faulty participants
-      for (participant, (mut transcript, ZU_i, KU_i, proof)) in messages {
-        let round_two_proofs_context = context(&mut transcript);
+      for (participant, (mut transcript, ZU_i, KU_i)) in messages {
         let (K_tilde_i_0, U_i) =
           self.observing_signing.K_tilde_i_0_U_i.remove(&participant).unwrap();
         // We do calculate Z_tilde prior, but not Z_tilde_i prior, so we calculcate this here
@@ -791,7 +798,7 @@ impl<CG: Element, P: Parameters<CG>> Aggregating<CG, P> {
           &crate::be_bytes(&self.observing_signing.lagrange_coefficients[&participant]),
         );
         if P::RoundTwoProofs::verify(
-          round_two_proofs_context,
+          setup.class_group(),
           setup.G(),
           setup.Y(),
           &self.Z_tilde,
@@ -802,7 +809,7 @@ impl<CG: Element, P: Parameters<CG>> Aggregating<CG, P> {
           U_i,
           ZU_i,
           KU_i,
-          &mut proof.as_slice(),
+          &mut transcript,
         )
         .is_err()
         {

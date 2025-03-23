@@ -45,7 +45,7 @@ pub trait Parameters<CG: Element>: Sized {
   /// The round one proofs.
   type RoundOneProofs: RoundOneProofs<CG, Self>;
   /// The round two proofs.
-  type RoundTwoProofs: RoundTwoProofs<Self::E, CG>;
+  type RoundTwoProofs: RoundTwoProofs<CG, Self>;
 
   /// Read a `E` while enforcing a canonical encoding.
   ///
@@ -80,8 +80,8 @@ impl<CG: Element, P: Primes> Parameters<CG> for Secp256k1<CG, P> {
 
   // TODO: Use proper proofs
   type Evrf = DummyEvrf;
-  type RoundOneProofs = Ccykc2023RoundOne<CG, Self, P>;
-  type RoundTwoProofs = NoIdentifiableAborts;
+  type RoundOneProofs = Ccykc2023RoundOne<P>;
+  type RoundTwoProofs = Ccykc2023RoundTwo<P>;
 
   fn from_xof(mut xof: blake3::OutputReader) -> Self::F {
     let mut bytes = [0; 64];

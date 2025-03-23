@@ -1,5 +1,4 @@
 use rand_core::OsRng;
-use class_groups::MalachiteElement;
 use dkg::Participant;
 use two_round_ecdsa::{SecurityLevel, Setup, SigningProtocol, Ready};
 
@@ -14,7 +13,7 @@ fn sign() {
   #[cfg(feature = "gmp")]
   type Primes = two_round_ecdsa::GmpPrimes;
 
-  let mut setups = Setup::<MalachiteElement, two_round_ecdsa::Secp256k1<_, Primes>>::dealer(
+  let mut setups = Setup::<Element, two_round_ecdsa::Secp256k1<_, Primes>>::dealer(
     &mut OsRng,
     SecurityLevel::Insecure,
     2,
