@@ -72,7 +72,7 @@ pub trait Evrf<CG: Element, P: Parameters<CG>> {
 /// This is not presented as a secure choice of eVRF. Using this removes the ability to simulate
 /// the nonce within the security proofs. This is presented solely for evaluation purposes or in
 /// case future works prove the security of this scheme even without the eVRF (as
-/// https://eprint.iacr.org/2021/1449 implies the security of).
+/// <https://eprint.iacr.org/2021/1449> implies the security of).
 pub struct DummyEvrf;
 impl<CG: Element, P: Parameters<CG>> Evrf<CG, P> for DummyEvrf {
   type SetupView = ();

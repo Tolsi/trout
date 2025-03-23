@@ -58,7 +58,7 @@ fn element<E: Element>(
 
 /// A class group.
 #[derive(Clone)]
-pub struct ClassGroup<E: Element = MalachiteElement> {
+pub struct ClassGroup<E: Element> {
   B: Natural,
   p: Natural,
   p_be_bytes: Vec<u8>,
@@ -76,7 +76,7 @@ impl<E: Element> ClassGroup<E> {
   ///
   /// `2 lambda` will the bit-length of the fundamental discriminant. 1827 is suggested as the
   /// bit-length of the fundamental discriminant for 128-bit security but please review
-  /// https://eprint.iacr.org/2020/196 for context on choices.
+  /// <https://eprint.iacr.org/2020/196> for context on choices.
   ///
   /// `p_be_bytes` is expected to be the big-endian encoding of the odd prime order of the
   /// subgroup.
@@ -386,10 +386,10 @@ impl<E: Element> ClassGroup<E> {
   }
 }
 
-#[test]
-fn class_group() {
+#[cfg(test)]
+fn test_class_group<E: Element>(mut rng: impl RngCore + CryptoRng) {
   let prime = 19;
-  let cg = ClassGroup::<MalachiteElement>::setup(&mut rand_core::OsRng, 100, vec![prime]).unwrap();
+  let cg = ClassGroup::<E>::setup(&mut rng, 100, vec![prime]).unwrap();
 
   // Do some complete-ness tests regarding identity
   assert_eq!(&cg.identity_p.double(), &cg.identity_p);
@@ -397,7 +397,7 @@ fn class_group() {
   assert_eq!(&-cg.identity_p.clone(), &cg.identity_p);
 
   // Select a generator
-  let g = cg.generator_p(&mut rand_core::OsRng);
+  let g = cg.generator_p(&mut rng);
   let g = Table::new(10, cg.identity_p.clone(), g);
 
   // Check add is complete with regards to doubling
@@ -419,25 +419,25 @@ fn class_group() {
   {
     let mut res = cg.identity_p.clone();
     res = res.add(&g[1].double());
-    assert_eq!(res, MalachiteElement::mul(&g, &[2]));
+    assert_eq!(res, E::mul(&g, &[2]));
 
     let mut pow = g[256].clone();
     res = res.add(&pow);
-    assert_eq!(res, MalachiteElement::mul(&g, &[1, 2]));
+    assert_eq!(res, E::mul(&g, &[1, 2]));
     for _ in 0 .. 8 {
       pow = pow.double();
     }
     res = res.add(&pow);
-    assert_eq!(res, MalachiteElement::mul(&g, &[1, 1, 2]));
+    assert_eq!(res, E::mul(&g, &[1, 1, 2]));
     for _ in 0 .. 8 {
       pow = pow.add(&pow);
     }
     res = res.add(&pow);
-    assert_eq!(res, MalachiteElement::mul(&g, &[1, 1, 1, 2]));
+    assert_eq!(res, E::mul(&g, &[1, 1, 1, 2]));
   }
 
   // Check f * prime == identity
-  assert_eq!(MalachiteElement::mul(&cg.f_table, &[prime]), cg.identity_p);
+  assert_eq!(E::mul(&cg.f_table, &[prime]), cg.identity_p);
 
   // Check we can solve for the discrete logarithm of all of our tabled scalings of f
   for (i, f) in cg.f().as_ref().iter().enumerate() {
@@ -473,4 +473,63 @@ fn class_group() {
     f.compress(&mut bytes).unwrap();
     assert_eq!(&cg.decompress_p(&mut bytes.as_slice()).unwrap(), f);
   }
+}
+
+#[cfg(test)]
+fn bench_class_group<E: Element>(mut rng: impl RngCore + CryptoRng) {
+  let class_group = ClassGroup::<E>::setup(&mut rng, 100, vec![19]).unwrap();
+  let g = class_group.generator_p(&mut rng);
+
+  {
+    let mut element = g.clone();
+    let start = std::time::Instant::now();
+    const ITERS: u32 = 10000;
+    for _ in 0 .. ITERS {
+      element = element.double();
+    }
+    let end = std::time::Instant::now();
+    println!(
+      "{} took {}ms for {} NUDUPLs",
+      core::any::type_name::<E>(),
+      end.duration_since(start).as_millis(),
+      ITERS
+    );
+  }
+
+  {
+    let mut element = g.clone();
+    let start = std::time::Instant::now();
+    const ITERS: u32 = 10000;
+    for _ in 0 .. ITERS {
+      element = element.add(&element);
+    }
+    let end = std::time::Instant::now();
+    println!(
+      "{} took {}ms for {} NUCOMPs",
+      core::any::type_name::<E>(),
+      end.duration_since(start).as_millis(),
+      ITERS
+    );
+  }
+}
+
+#[test]
+fn malachite_class_group() {
+  test_class_group::<crate::MalachiteElement>(&mut rand_core::OsRng);
+}
+
+#[cfg(feature = "gmp")]
+#[test]
+fn gmp_class_group() {
+  test_class_group::<crate::GmpElement>(&mut rand_core::OsRng);
+}
+
+#[test]
+fn bench() {
+  use rand_core::SeedableRng;
+  use rand_chacha::ChaCha20Rng;
+  const SEED: [u8; 32] = [0; 32];
+  bench_class_group::<crate::MalachiteElement>(ChaCha20Rng::from_seed(SEED));
+  #[cfg(feature = "gmp")]
+  bench_class_group::<crate::GmpElement>(ChaCha20Rng::from_seed(SEED));
 }

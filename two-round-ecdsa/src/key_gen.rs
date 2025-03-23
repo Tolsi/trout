@@ -16,8 +16,8 @@ use crate::{UnsignedInteger, Evrf, Parameters};
 
 /// The security level to target with the setup.
 ///
-/// These are defined per https://eprint.iacr.org/2020/196. Please note a rebuttal of this paper's
-/// definition exists in https://eprint.iacr.org/2021/291, as its Remark 1.
+/// These are defined per <https://eprint.iacr.org/2020/196>. Please note a rebuttal of this
+/// paper's definition exists in <https://eprint.iacr.org/2021/291>, as its Remark 1.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u8)]
 pub enum SecurityLevel {

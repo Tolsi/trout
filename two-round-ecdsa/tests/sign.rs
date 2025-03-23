@@ -6,7 +6,11 @@ use two_round_ecdsa::{SecurityLevel, Setup, SigningProtocol, Ready};
 #[test]
 fn sign() {
   #[cfg(not(feature = "gmp"))]
+  type Element = class_groups::MalachiteElement;
+  #[cfg(not(feature = "gmp"))]
   type Primes = two_round_ecdsa::CryptoPrimesStackCcyck;
+  #[cfg(feature = "gmp")]
+  type Element = class_groups::GmpElement;
   #[cfg(feature = "gmp")]
   type Primes = two_round_ecdsa::GmpPrimes;
 

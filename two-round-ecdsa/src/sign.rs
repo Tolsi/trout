@@ -20,7 +20,8 @@ use crate::{
   SetupView, Setup,
 };
 
-// Sample a context hash.
+/// Sample a context hash.
+// TODO: Remove this solely for DigestReader/DigestWriter
 fn context(hasher: &mut blake3::Hasher) -> [u8; 32] {
   let hash = hasher.finalize();
   // Advance the hasher so future samples are distinct
@@ -123,12 +124,12 @@ impl<CG: Element, P: Parameters<CG>> SigningProtocol<CG, P> {
   /// Delayed specification of the signing set/message was not proven secure in the paper.
   /// Post-specification of the signing set allows an adversary to bias the nonce via choice of
   /// set (as different sets will produce distinct nonces). Post-specification of the message is
-  /// known to enable attacks on certain multisignature scheme (https://eprint.iacr.org/2024/437),
-  /// even with simulatable nonces.
+  /// known to enable attacks on certain multisignature scheme
+  /// (<https://eprint.iacr.org/2024/437>), even with simulatable nonces.
   ///
   /// There is supporting evidence that the ROS problem is hard for ECDSA in
-  /// https://eprint.iacr.org/2021/1449. That would imply post-specification of signing set/message
-  /// may be without issue, so long as a session ID is never reused.
+  /// <https://eprint.iacr.org/2021/1449>. That would imply post-specification of
+  /// signing set/message may be without issue, so long as a session ID is never reused.
   ///
   /// This code defers the derivation of session ID, and specification timeline, to the caller in
   /// order to enable these features if proven secure. The caller is trusted with the important,
