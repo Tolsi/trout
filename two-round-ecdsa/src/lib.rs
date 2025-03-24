@@ -6,7 +6,8 @@
 use core::marker::PhantomData;
 use std::io;
 
-use zeroize::Zeroize;
+use subtle::{Choice, ConditionallySelectable};
+use zeroize::{Zeroize, Zeroizing};
 
 use group::{ff::PrimeFieldBits, GroupEncoding, prime::PrimeGroup};
 use class_groups::Element;
@@ -14,8 +15,9 @@ use class_groups::Element;
 mod integer;
 pub use integer::UnsignedInteger;
 
-mod proofs;
-pub use proofs::*;
+/// ZK proofs included for the protocols.
+pub mod proofs;
+pub(crate) use proofs::*;
 
 mod key_gen;
 pub use key_gen::*;
@@ -23,17 +25,44 @@ pub use key_gen::*;
 mod sign;
 pub use sign::*;
 
+pub(crate) struct ToLeBits<F: PrimeFieldBits> {
+  underlying: group::ff::FieldBits<F::ReprBits>,
+  i: usize,
+}
+impl<F: PrimeFieldBits> Iterator for ToLeBits<F> {
+  type Item = Choice;
+  fn next(&mut self) -> Option<Choice> {
+    if self.i > usize::try_from(F::NUM_BITS).unwrap() {
+      None?;
+    }
+    let mut bit_raw = self.underlying.get_mut(self.i).unwrap();
+    self.i += 1;
+
+    // The following black_box/Zeroizing are a best-effort, horrific attempt to avoid side-channels
+    let bit_bool =
+      Zeroizing::new(*core::hint::black_box(core::convert::AsRef::<bool>::as_ref(&bit_raw)));
+    // zeroize the underlying bitstore as we iterate so secret material isn't left behind
+    core::convert::AsMut::<bool>::as_mut(&mut bit_raw).zeroize();
+    let bit_u8 = u8::from(core::hint::black_box(*bit_bool));
+    Some(bit_u8.into())
+  }
+}
+/// Alternative to `to_le_bits` which returns `Choice` instead of `bool`
+pub(crate) fn const_to_le_bits<F: PrimeFieldBits>(scalar: &F) -> ToLeBits<F> {
+  ToLeBits { underlying: scalar.to_le_bits(), i: 0 }
+}
+
 pub(crate) fn be_bytes<F: PrimeFieldBits>(scalar: &F) -> Vec<u8> {
   let mut bytes = vec![0; F::NUM_BITS.div_ceil(8).try_into().unwrap()];
-  for (i, bit) in scalar.to_le_bits().iter().enumerate() {
+  for (i, bit) in const_to_le_bits(scalar).enumerate() {
     // The least-significant bit goes into the last unpopulated byte
     let byte = bytes.len() - ((i / 8) + 1);
-    bytes[byte] |= u8::from(*bit) << (i % 8);
+    bytes[byte] |= u8::conditional_select(&0, &(1 << (i % 8)), bit);
   }
   bytes
 }
 
-/// ECDSA parameters.
+/// Parameters for the signing protocol.
 pub trait Parameters<CG: Element>: Sized {
   /// The elliptic curve.
   type E: PrimeGroup<Scalar = Self::F>;
@@ -78,7 +107,7 @@ impl<CG: Element, P: Primes> Parameters<CG> for Secp256k1<CG, P> {
   type E = k256::ProjectivePoint;
   type F = k256::Scalar;
 
-  // TODO: Use proper proofs
+  // TODO: Use a proper eVRF
   type Evrf = DummyEvrf;
   type RoundOneProofs = Ccykc2023RoundOne<P>;
   type RoundTwoProofs = Ccykc2023RoundTwo<P>;

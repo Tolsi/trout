@@ -1,6 +1,6 @@
 #[test]
 fn primes() {
-  use two_round_ecdsa::{Primes, CryptoPrimesStack, CryptoPrimesHeap, GmpPrimes};
+  use two_round_ecdsa::proofs::{Primes, CryptoPrimesStack, CryptoPrimesHeap, GmpPrimes};
 
   fn test<P: Primes>() {
     let start = std::time::Instant::now();

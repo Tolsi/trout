@@ -7,11 +7,11 @@ fn sign() {
   #[cfg(not(feature = "gmp"))]
   type Element = class_groups::MalachiteElement;
   #[cfg(not(feature = "gmp"))]
-  type Primes = two_round_ecdsa::CryptoPrimesStackCcyck;
+  type Primes = two_round_ecdsa::proofs::CryptoPrimesStackCcyck;
   #[cfg(feature = "gmp")]
   type Element = class_groups::GmpElement;
   #[cfg(feature = "gmp")]
-  type Primes = two_round_ecdsa::GmpPrimes;
+  type Primes = two_round_ecdsa::proofs::GmpPrimes;
 
   let mut setups = Setup::<Element, two_round_ecdsa::Secp256k1<_, Primes>>::dealer(
     &mut OsRng,
