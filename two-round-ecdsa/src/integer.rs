@@ -1,4 +1,4 @@
-use core::ops::{Add, Mul};
+use core::ops::{Add, AddAssign, Mul};
 
 use zeroize::{Zeroize, Zeroizing};
 use rand_core::{RngCore, CryptoRng};
@@ -11,6 +11,10 @@ use crypto_bigint::{NonZero, BoxedUint};
 pub struct UnsignedInteger(pub(crate) BoxedUint);
 
 impl UnsignedInteger {
+  pub(crate) fn zero() -> Self {
+    Self(BoxedUint::zero())
+  }
+
   #[must_use]
   pub(crate) fn to_be_bytes(&self) -> Box<[u8]> {
     self.0.to_be_bytes()
@@ -52,12 +56,30 @@ impl Add for &UnsignedInteger {
   }
 }
 
+impl AddAssign for UnsignedInteger {
+  fn add_assign(&mut self, other: Self) {
+    let new_precision = self.0.bits_precision().max(other.0.bits_precision()) + 1;
+    let res = self.0.widen(new_precision);
+    *self = Self(&other.0 + res);
+  }
+}
+
 impl Mul for &UnsignedInteger {
   type Output = UnsignedInteger;
   fn mul(self, other: Self) -> UnsignedInteger {
     let new_precision = self.0.bits_precision() + other.0.bits_precision();
     let mut res = self.0.widen(new_precision);
     res *= &other.0;
+    UnsignedInteger(res)
+  }
+}
+
+impl Mul<&BoxedUint> for &UnsignedInteger {
+  type Output = UnsignedInteger;
+  fn mul(self, other: &BoxedUint) -> UnsignedInteger {
+    let new_precision = self.0.bits_precision() + other.bits_precision();
+    let mut res = self.0.widen(new_precision);
+    res *= other;
     UnsignedInteger(res)
   }
 }

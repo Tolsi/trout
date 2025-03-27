@@ -325,13 +325,13 @@ impl<CG: Element, P: Parameters<CG>> Observing<CG, P> {
 
       // Prepare the batch verifications
       let mut evrf_batch_verifier = P::Evrf::batch_verifier(self.setup.evrf_global_setup());
-      let mut round_one_batch_verifier = P::RoundOneProofs::batch_verifier();
+      let mut round_one_batch_verifier = P::RoundOneProofs::batch_verifier(self.pending.len());
       for (participant, message) in self.pending.drain() {
         let message = message.as_slice();
         let mut message = DigestReader(self.transcript.clone(), message);
 
         let Ok(R_i) = P::Evrf::queue_verification(
-          rng,
+          &mut *rng,
           self.setup.evrf_global_setup(),
           &mut evrf_batch_verifier,
           participant,
@@ -358,14 +358,13 @@ impl<CG: Element, P: Parameters<CG>> Observing<CG, P> {
         };
 
         let Ok(()) = P::RoundOneProofs::queue_verification(
+          &mut *rng,
           &mut round_one_batch_verifier,
           participant,
           self.setup.class_group(),
-          self.setup.G(),
-          self.setup.Y(),
           R_i,
-          &K_tilde_i,
-          &U_i,
+          K_tilde_i.clone(),
+          U_i.clone(),
           &mut message,
         ) else {
           faulty.insert(participant);
@@ -384,7 +383,12 @@ impl<CG: Element, P: Parameters<CG>> Observing<CG, P> {
           }
         }
       }
-      match P::RoundOneProofs::verify(round_one_batch_verifier) {
+      match P::RoundOneProofs::verify(
+        self.setup.class_group(),
+        self.setup.G(),
+        self.setup.Y(),
+        round_one_batch_verifier,
+      ) {
         Ok(()) => {}
         Err(faults) => {
           for fault in faults {

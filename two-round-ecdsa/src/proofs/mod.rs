@@ -234,6 +234,20 @@ pub(crate) mod ccykc {
   pub(crate) fn read_e<R: Read>(
     transcript: &mut DigestReader<R>,
     modulus: &crypto_bigint::NonZero<crypto_bigint::BoxedUint>,
+  ) -> io::Result<UnsignedInteger> {
+    let mut e = vec![0; modulus.bits().div_ceil(8).try_into().unwrap()];
+    transcript.read_exact(&mut e)?;
+    let e_int = UnsignedInteger::from_be_slice(&e);
+    if e_int.0 > **modulus {
+      Err(io::Error::other("unreduced e"))?;
+    }
+    Ok(e_int)
+  }
+
+  // TODO: Remove
+  pub(crate) fn read_e_bytes<R: Read>(
+    transcript: &mut DigestReader<R>,
+    modulus: &crypto_bigint::NonZero<crypto_bigint::BoxedUint>,
   ) -> io::Result<Vec<u8>> {
     let mut e = vec![0; modulus.bits().div_ceil(8).try_into().unwrap()];
     transcript.read_exact(&mut e)?;

@@ -195,9 +195,10 @@ impl<CG: Element, P: Parameters<CG>, Pr: Primes> RoundTwoProofs<CG, P> for Ccykc
     let s_u_i = Zeroizing::new(
       r_u_i.deref() +
         &Zeroizing::new(
-          &c * &Zeroizing::new(UnsignedInteger::from_be_slice(&Zeroizing::new(crate::be_bytes(
+          &c * Zeroizing::new(UnsignedInteger::from_be_slice(&Zeroizing::new(crate::be_bytes(
             u_i,
-          )))),
+          ))))
+          .deref(),
         ),
     );
 
@@ -263,10 +264,10 @@ impl<CG: Element, P: Parameters<CG>, Pr: Primes> RoundTwoProofs<CG, P> for Ccykc
     let D_ZU_i = class_group.decompress_p(&mut *transcript)?;
     let D_KU_i = class_group.decompress_p(&mut *transcript)?;
 
-    let e_delta_i = crate::ccykc::read_e(&mut *transcript, &modulus)?;
-    let e_alpha_i = crate::ccykc::read_e(&mut *transcript, &modulus)?;
-    let e_beta_i = crate::ccykc::read_e(&mut *transcript, &modulus)?;
-    let e_u_i = crate::ccykc::read_e(&mut *transcript, &modulus)?;
+    let e_delta_i = crate::ccykc::read_e_bytes(&mut *transcript, &modulus)?;
+    let e_alpha_i = crate::ccykc::read_e_bytes(&mut *transcript, &modulus)?;
+    let e_beta_i = crate::ccykc::read_e_bytes(&mut *transcript, &modulus)?;
+    let e_u_i = crate::ccykc::read_e_bytes(&mut *transcript, &modulus)?;
 
     if CG::mul_once(class_group.identity_p().clone(), D_Z_tilde_i_0, &modulus_bytes)
       .add(&CG::mul(G, &e_delta_i)) !=

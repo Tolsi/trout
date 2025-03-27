@@ -14,6 +14,7 @@ crypto-primes = { version = "=0.6.2", default-features = false }
 rug = { version = "1", default-features = false, features = ["std", "integer"], optional = true }
 
 group = { version = "0.13", default-features = false, features = ["alloc"] }
+multiexp = { version = "0.4", default-features = false, features = ["std"] }
 dkg = { version = "0.5", default-features = false, features = ["std"] }
 
 class-groups = { path = "../class-groups" }

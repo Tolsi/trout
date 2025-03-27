@@ -44,7 +44,7 @@ pub trait RoundOneProofs<CG: Element, P: Parameters<CG>> {
   ) -> io::Result<()>;
 
   /// Create a batch verifier of round one proofs.
-  fn batch_verifier() -> Self::BatchVerifier;
+  fn batch_verifier(proofs: usize) -> Self::BatchVerifier;
 
   /// Queue verification of someone's round one proofs.
   ///
@@ -55,28 +55,42 @@ pub trait RoundOneProofs<CG: Element, P: Parameters<CG>> {
   /// guaranteed to not be mutated however, meaning a proof which raises an error while being
   /// queued will not corrupt the batch verifier and will leave it eligible to verify other proofs.
   fn queue_verification<R: io::Read>(
+    rng: &mut (impl RngCore + CryptoRng),
     batch_verifier: &mut Self::BatchVerifier,
     participant: dkg::Participant,
     class_group: &ClassGroup<CG>,
-    G: &Table<CG>,
-    Y: &Table<CG>,
     R_i: P::E,
-    K_tilde_i: &(CG, CG),
-    U_i: &CG,
+    K_tilde_i: (CG, CG),
+    U_i: CG,
     transcript: &mut DigestReader<R>,
   ) -> io::Result<()>;
 
   /// Verify all proofs within the batch verifier.
   ///
   /// Returns `Ok(())` or a list of *all* of the *faulty* participants.
-  fn verify(batch_verifier: Self::BatchVerifier) -> Result<(), Vec<dkg::Participant>>;
+  fn verify(
+    class_group: &ClassGroup<CG>,
+    G: &Table<CG>,
+    Y: &Table<CG>,
+    batch_verifier: Self::BatchVerifier,
+  ) -> Result<(), Vec<dkg::Participant>>;
+}
+
+/// The batch verifier for `Ccykc2023RoundOne`.
+pub struct Ccykc2023RoundOneBatchVerifier<CG: Element, P: Parameters<CG>> {
+  G: UnsignedInteger,
+  Y: UnsignedInteger,
+  H: P::F,
+  E: P::F,
+  additional_elliptic_curve: Vec<(P::F, P::E)>,
+  additional_class_group: Vec<(CG, UnsignedInteger)>,
 }
 
 /// Proofs from Cui, Chan, Yuen, Kang, and Chu's Bandwidth-Efficient Zero-Knowledge Proofs for
 /// Threshold ECDSA (2023).
 pub struct Ccykc2023RoundOne<Pr: Primes>(PhantomData<Pr>);
 impl<CG: Element, P: Parameters<CG>, Pr: Primes> RoundOneProofs<CG, P> for Ccykc2023RoundOne<Pr> {
-  type BatchVerifier = ();
+  type BatchVerifier = Ccykc2023RoundOneBatchVerifier<CG, P>;
 
   fn prove<W: io::Write>(
     rng: &mut (impl RngCore + CryptoRng),
@@ -177,19 +191,25 @@ impl<CG: Element, P: Parameters<CG>, Pr: Primes> RoundOneProofs<CG, P> for Ccykc
     Ok(())
   }
 
-  fn batch_verifier() -> Self::BatchVerifier {
-    ()
+  fn batch_verifier(proofs: usize) -> Self::BatchVerifier {
+    Ccykc2023RoundOneBatchVerifier {
+      G: UnsignedInteger::zero(),
+      Y: UnsignedInteger::zero(),
+      H: P::F::ZERO,
+      E: P::F::ZERO,
+      additional_elliptic_curve: Vec::with_capacity(2 * proofs),
+      additional_class_group: Vec::with_capacity(10 * proofs),
+    }
   }
 
   fn queue_verification<R: io::Read>(
-    _batch_verifier: &mut Self::BatchVerifier,
+    rng: &mut (impl RngCore + CryptoRng),
+    batch_verifier: &mut Self::BatchVerifier,
     _participant: dkg::Participant,
     class_group: &ClassGroup<CG>,
-    G: &Table<CG>,
-    Y: &Table<CG>,
     R_i: P::E,
-    K_tilde_i: &(CG, CG),
-    U_i: &CG,
+    K_tilde_i: (CG, CG),
+    U_i: CG,
     transcript: &mut DigestReader<R>,
   ) -> io::Result<()> {
     // ZKPoKLog commitment
@@ -206,8 +226,7 @@ impl<CG: Element, P: Parameters<CG>, Pr: Primes> RoundOneProofs<CG, P> for Ccykc
 
     let c_uint = UnsignedInteger::from_be_slice(&crate::be_bytes(&c));
     let modulus = (&prime * &UnsignedInteger::from_be_slice(class_group.p())).0;
-    let modulus_bytes = modulus.to_be_bytes();
-    let modulus = crypto_bigint::NonZero::new(modulus).unwrap();
+    let non_zero_modulus = crypto_bigint::NonZero::new(modulus.clone()).unwrap();
 
     // ZKPoKLog response
     {
@@ -216,71 +235,95 @@ impl<CG: Element, P: Parameters<CG>, Pr: Primes> RoundOneProofs<CG, P> for Ccykc
       let s_message = Option::<P::F>::from(P::F::from_repr(s_message))
         .ok_or_else(|| io::Error::other("invalid s_message"))?;
 
-      if (P::E::generator() * s_message) != (R_message + (R_i * c)) {
-        Err(io::Error::other("R_i PoK was invalid"))?;
+      {
+        let weight = P::F::random(&mut *rng);
+        batch_verifier.additional_elliptic_curve.push((weight, R_message));
+        batch_verifier.additional_elliptic_curve.push((weight * c, R_i));
+        batch_verifier.E -= weight * s_message;
       }
 
       let D_randomness_commitment = class_group.decompress_p(&mut *transcript)?;
       let D_ciphertext = class_group.decompress_p(&mut *transcript)?;
-      let e_randomness = crate::ccykc::read_e(&mut *transcript, &modulus)?;
+      let e_randomness = crate::ccykc::read_e(&mut *transcript, &non_zero_modulus)?;
 
       {
-        let lhs =
-          CG::mul_once(class_group.identity_p().clone(), D_randomness_commitment, &modulus_bytes);
-        let lhs = lhs.add(&CG::mul(G, &e_randomness));
+        let weight = UnsignedInteger::random(128, &mut *rng);
+        batch_verifier.additional_class_group.push((D_randomness_commitment, &weight * &modulus));
+        batch_verifier.G += &weight * &e_randomness;
 
-        let rhs = CG::mul_once(
-          class_group.identity_p().clone(),
-          K_tilde_i.0.clone(),
-          &c_uint.to_be_bytes(),
-        );
-        let rhs = R_randomness_commitment.add(&rhs);
-
-        if lhs != rhs {
-          Err(io::Error::other("K_tilde_i.0 PoK was invalid"))?;
-        }
+        batch_verifier.additional_class_group.push((-R_randomness_commitment, weight.clone()));
+        batch_verifier.additional_class_group.push((-K_tilde_i.0, &weight * &c_uint));
       }
 
       {
-        let lhs = CG::mul_once(class_group.identity_p().clone(), D_ciphertext, &modulus_bytes);
-        let lhs = lhs
-          .add(&CG::mul(Y, &e_randomness))
-          .add(&CG::mul(class_group.f(), &crate::be_bytes(&s_message)));
+        let weight_scalar = P::F::random(&mut *rng);
+        let weight = UnsignedInteger::from_be_slice(&crate::be_bytes(&weight_scalar));
+        batch_verifier.additional_class_group.push((D_ciphertext, &weight * &modulus));
+        batch_verifier.Y += &weight * &e_randomness;
+        batch_verifier.H += weight_scalar * s_message;
 
-        let rhs = CG::mul_once(
-          class_group.identity_p().clone(),
-          K_tilde_i.1.clone(),
-          &c_uint.to_be_bytes(),
-        );
-        let rhs = R_ciphertext.add(&rhs);
-
-        if lhs != rhs {
-          Err(io::Error::other("K_tilde_i.1 PoK was invalid"))?;
-        }
+        batch_verifier.additional_class_group.push((-R_ciphertext, weight.clone()));
+        batch_verifier.additional_class_group.push((-K_tilde_i.1, &weight * &c_uint));
       }
     }
 
     // ZKPoKRepS response
     {
       let D_U = class_group.decompress_p(&mut *transcript)?;
-      let e_beta_i = crate::ccykc::read_e(&mut *transcript, &modulus)?;
-      let e_u_i = crate::ccykc::read_e(&mut *transcript, &modulus)?;
+      let e_beta_i = crate::ccykc::read_e(&mut *transcript, &non_zero_modulus)?;
+      let e_u_i = crate::ccykc::read_e(&mut *transcript, &non_zero_modulus)?;
 
-      let lhs = CG::mul_once(class_group.identity_p().clone(), D_U, &modulus_bytes);
-      let lhs = lhs.add(&CG::mul(G, &e_beta_i)).add(&CG::mul(Y, &e_u_i));
+      let weight = UnsignedInteger::random(128, &mut *rng);
 
-      let rhs = CG::mul_once(class_group.identity_p().clone(), U_i.clone(), &c_uint.to_be_bytes());
-      let rhs = R_U.add(&rhs);
+      batch_verifier.additional_class_group.push((D_U, &weight * &modulus));
+      batch_verifier.G += &weight * &e_beta_i;
+      batch_verifier.Y += &weight * &e_u_i;
 
-      if lhs != rhs {
-        Err(io::Error::other("U_i PoK was invalid"))?;
-      }
+      batch_verifier.additional_class_group.push((-R_U, weight.clone()));
+      batch_verifier.additional_class_group.push((-U_i, &weight * &c_uint));
     }
 
     Ok(())
   }
 
-  fn verify(_batch_verifier: Self::BatchVerifier) -> Result<(), Vec<dkg::Participant>> {
+  fn verify(
+    class_group: &ClassGroup<CG>,
+    G: &Table<CG>,
+    Y: &Table<CG>,
+    batch_verifier: Self::BatchVerifier,
+  ) -> Result<(), Vec<dkg::Participant>> {
+    {
+      let G_scalar = batch_verifier.G.to_be_bytes();
+      let Y_scalar = batch_verifier.Y.to_be_bytes();
+      let H_scalar = crate::be_bytes(&batch_verifier.H);
+      let mut additional = Vec::with_capacity(batch_verifier.additional_class_group.len());
+      for (point, scalar) in batch_verifier.additional_class_group {
+        let bytes = scalar.to_be_bytes();
+        additional.push((
+          Table::new_for_scalar_bits(bytes.len() * 8, class_group.identity_p().clone(), point),
+          bytes,
+        ));
+      }
+      let mut multiexp: Vec<(_, &[u8])> = Vec::with_capacity(3 + additional.len());
+      multiexp.push((G, &G_scalar));
+      multiexp.push((Y, &Y_scalar));
+      multiexp.push((class_group.f(), &H_scalar));
+      for (table, scalar) in &additional {
+        multiexp.push((table, scalar));
+      }
+      if CG::multiexp(class_group.identity_p(), &multiexp) != *class_group.identity_p() {
+        todo!("TODO");
+      }
+    }
+
+    {
+      let mut multiexp = batch_verifier.additional_elliptic_curve;
+      multiexp.push((batch_verifier.E, P::E::generator()));
+      if !bool::from(::multiexp::multiexp_vartime(&multiexp).is_identity()) {
+        todo!("TODO");
+      }
+    }
+
     Ok(())
   }
 }
