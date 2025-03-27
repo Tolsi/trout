@@ -4,7 +4,6 @@ use std::io;
 use zeroize::Zeroizing;
 use rand_core::{RngCore, CryptoRng};
 
-use group::ff::PrimeField;
 use class_groups::{Element, Table, ClassGroup};
 
 use crate::{UnsignedInteger, DigestReader, DigestWriter, Primes, Parameters};
@@ -250,112 +249,42 @@ impl<CG: Element, P: Parameters<CG>, Pr: Primes> RoundTwoProofs<CG, P> for Ccykc
     let e_beta_i = crate::ccykc::read_e(&mut *transcript, &modulus)?;
     let e_u_i = crate::ccykc::read_e(&mut *transcript, &modulus)?;
 
-    if CG::mul(
-      &Table::new_for_scalar_bits(
-        modulus.bits().try_into().unwrap(),
-        class_group.identity_p().clone(),
-        D_Z_tilde_i_0,
-      ),
-      &modulus_bytes,
-    )
-    .add(&CG::mul(G, &e_delta_i)) !=
-      R_Z_tilde_i_0.add(&CG::mul(
-        &Table::new_for_scalar_bits(
-          P::F::NUM_BITS.try_into().unwrap(),
-          class_group.identity_p().clone(),
-          Z_tilde_i_0,
-        ),
-        &c,
-      ))
+    if CG::mul_once(class_group.identity_p().clone(), D_Z_tilde_i_0, &modulus_bytes)
+      .add(&CG::mul(G, &e_delta_i)) !=
+      R_Z_tilde_i_0.add(&CG::mul_once(class_group.identity_p().clone(), Z_tilde_i_0, &c))
     {
       Err(io::Error::other("Z_tilde_i.0 PoK was invalid"))?;
     }
 
-    if CG::mul(
-      &Table::new_for_scalar_bits(
-        modulus.bits().try_into().unwrap(),
-        class_group.identity_p().clone(),
-        D_K_tilde_i_0,
-      ),
-      &modulus_bytes,
-    )
-    .add(&CG::mul(G, &e_alpha_i)) !=
-      R_K_tilde_i_0.add(&CG::mul(
-        &Table::new_for_scalar_bits(
-          P::F::NUM_BITS.try_into().unwrap(),
-          class_group.identity_p().clone(),
-          K_tilde_i_0,
-        ),
-        &c,
-      ))
+    if CG::mul_once(class_group.identity_p().clone(), D_K_tilde_i_0, &modulus_bytes)
+      .add(&CG::mul(G, &e_alpha_i)) !=
+      R_K_tilde_i_0.add(&CG::mul_once(class_group.identity_p().clone(), K_tilde_i_0, &c))
     {
       Err(io::Error::other("K_tilde_i.0 PoK was invalid"))?;
     }
 
-    if CG::mul(
-      &Table::new_for_scalar_bits(
-        modulus.bits().try_into().unwrap(),
-        class_group.identity_p().clone(),
-        D_U_i,
-      ),
-      &modulus_bytes,
-    )
-    .add(&CG::mul(G, &e_beta_i))
-    .add(&CG::mul(Y, &e_u_i)) !=
-      R_U_i.add(&CG::mul(
-        &Table::new_for_scalar_bits(
-          P::F::NUM_BITS.try_into().unwrap(),
-          class_group.identity_p().clone(),
-          U_i,
-        ),
-        &c,
-      ))
+    if CG::mul_once(class_group.identity_p().clone(), D_U_i, &modulus_bytes)
+      .add(&CG::mul(G, &e_beta_i))
+      .add(&CG::mul(Y, &e_u_i)) !=
+      R_U_i.add(&CG::mul_once(class_group.identity_p().clone(), U_i, &c))
     {
       Err(io::Error::other("U_i.0 PoK was invalid"))?;
     }
 
-    if CG::mul(
-      &Table::new_for_scalar_bits(
-        modulus.bits().try_into().unwrap(),
-        class_group.identity_p().clone(),
-        D_ZU_i,
-      ),
-      &modulus_bytes,
-    )
-    .add(&CG::mul(&Z_tilde.1, &e_u_i))
-    .add(&CG::mul(U, &e_delta_i))
-    .add(&CG::mul(&Z_tilde.0, &e_beta_i)) !=
-      R_ZU_i.add(&CG::mul(
-        &Table::new_for_scalar_bits(
-          P::F::NUM_BITS.try_into().unwrap(),
-          class_group.identity_p().clone(),
-          ZU_i,
-        ),
-        &c,
-      ))
+    if CG::mul_once(class_group.identity_p().clone(), D_ZU_i, &modulus_bytes)
+      .add(&CG::mul(&Z_tilde.1, &e_u_i))
+      .add(&CG::mul(U, &e_delta_i))
+      .add(&CG::mul(&Z_tilde.0, &e_beta_i)) !=
+      R_ZU_i.add(&CG::mul_once(class_group.identity_p().clone(), ZU_i, &c))
     {
       Err(io::Error::other("ZU_i.0 PoK was invalid"))?;
     }
 
-    if CG::mul(
-      &Table::new_for_scalar_bits(
-        modulus.bits().try_into().unwrap(),
-        class_group.identity_p().clone(),
-        D_KU_i,
-      ),
-      &modulus_bytes,
-    )
-    .add(&CG::mul(&K_tilde.1, &e_u_i))
-    .add(&CG::mul(U, &e_alpha_i))
-    .add(&CG::mul(&K_tilde.0, &e_beta_i)) !=
-      R_KU_i.add(&CG::mul(
-        &Table::new_for_scalar_bits(
-          P::F::NUM_BITS.try_into().unwrap(),
-          class_group.identity_p().clone(),
-          KU_i,
-        ),
-        &c,
-      ))
+    if CG::mul_once(class_group.identity_p().clone(), D_KU_i, &modulus_bytes)
+      .add(&CG::mul(&K_tilde.1, &e_u_i))
+      .add(&CG::mul(U, &e_alpha_i))
+      .add(&CG::mul(&K_tilde.0, &e_beta_i)) !=
+      R_KU_i.add(&CG::mul_once(class_group.identity_p().clone(), KU_i, &c))
     {
       Err(io::Error::other("KU_i.0 PoK was invalid"))?;
     }

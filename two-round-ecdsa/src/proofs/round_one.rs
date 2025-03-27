@@ -217,22 +217,13 @@ impl<CG: Element, P: Parameters<CG>, Pr: Primes> RoundOneProofs<CG, P> for Ccykc
       let e_randomness = crate::ccykc::read_e(&mut *transcript, &modulus)?;
 
       {
-        let lhs = CG::mul(
-          &Table::new_for_scalar_bits(
-            modulus.bits().try_into().unwrap(),
-            class_group.identity_p().clone(),
-            D_randomness_commitment,
-          ),
-          &modulus_bytes,
-        );
+        let lhs =
+          CG::mul_once(class_group.identity_p().clone(), D_randomness_commitment, &modulus_bytes);
         let lhs = lhs.add(&CG::mul(G, &e_randomness));
 
-        let rhs = CG::mul(
-          &Table::new_for_scalar_bits(
-            P::F::NUM_BITS.try_into().unwrap(),
-            class_group.identity_p().clone(),
-            K_tilde_i.0.clone(),
-          ),
+        let rhs = CG::mul_once(
+          class_group.identity_p().clone(),
+          K_tilde_i.0.clone(),
           &c_uint.to_be_bytes(),
         );
         let rhs = R_randomness_commitment.add(&rhs);
@@ -243,24 +234,14 @@ impl<CG: Element, P: Parameters<CG>, Pr: Primes> RoundOneProofs<CG, P> for Ccykc
       }
 
       {
-        let lhs = CG::mul(
-          &Table::new_for_scalar_bits(
-            modulus.bits().try_into().unwrap(),
-            class_group.identity_p().clone(),
-            D_ciphertext,
-          ),
-          &modulus_bytes,
-        );
+        let lhs = CG::mul_once(class_group.identity_p().clone(), D_ciphertext, &modulus_bytes);
         let lhs = lhs
           .add(&CG::mul(Y, &e_randomness))
           .add(&CG::mul(class_group.f(), &crate::be_bytes(&s_message)));
 
-        let rhs = CG::mul(
-          &Table::new_for_scalar_bits(
-            P::F::NUM_BITS.try_into().unwrap(),
-            class_group.identity_p().clone(),
-            K_tilde_i.1.clone(),
-          ),
+        let rhs = CG::mul_once(
+          class_group.identity_p().clone(),
+          K_tilde_i.1.clone(),
           &c_uint.to_be_bytes(),
         );
         let rhs = R_ciphertext.add(&rhs);
@@ -277,24 +258,10 @@ impl<CG: Element, P: Parameters<CG>, Pr: Primes> RoundOneProofs<CG, P> for Ccykc
       let e_beta_i = crate::ccykc::read_e(&mut *transcript, &modulus)?;
       let e_u_i = crate::ccykc::read_e(&mut *transcript, &modulus)?;
 
-      let lhs = CG::mul(
-        &Table::new_for_scalar_bits(
-          modulus.bits().try_into().unwrap(),
-          class_group.identity_p().clone(),
-          D_U,
-        ),
-        &modulus_bytes,
-      );
+      let lhs = CG::mul_once(class_group.identity_p().clone(), D_U, &modulus_bytes);
       let lhs = lhs.add(&CG::mul(G, &e_beta_i)).add(&CG::mul(Y, &e_u_i));
 
-      let rhs = CG::mul(
-        &Table::new_for_scalar_bits(
-          P::F::NUM_BITS.try_into().unwrap(),
-          class_group.identity_p().clone(),
-          U_i.clone(),
-        ),
-        &c_uint.to_be_bytes(),
-      );
+      let rhs = CG::mul_once(class_group.identity_p().clone(), U_i.clone(), &c_uint.to_be_bytes());
       let rhs = R_U.add(&rhs);
 
       if lhs != rhs {

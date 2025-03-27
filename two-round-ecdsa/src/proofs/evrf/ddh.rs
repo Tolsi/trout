@@ -684,7 +684,8 @@ impl<
     rng: &mut (impl RngCore + CryptoRng),
     global_setup: &Self::GlobalSetup,
     batch_verifier: &mut Self::BatchVerifier,
-    participant: dkg::Participant,
+    // TODO: Use this to implement identifiable aborts
+    _participant: dkg::Participant,
     setup: &Self::SetupView,
     context: &Self::Context,
     transcript: &mut DigestReader<R>,
