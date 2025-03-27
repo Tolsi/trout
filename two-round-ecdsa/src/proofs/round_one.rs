@@ -101,9 +101,14 @@ impl<CG: Element, P: Parameters<CG>, Pr: Primes> RoundOneProofs<CG, P> for Ccykc
     // Write `S_2` from the paper
     CG::mul(G, &Zeroizing::new(r_randomness.to_be_bytes())).compress(&mut *transcript)?;
     // Write `S_1` from the paper
-    CG::mul(Y, &Zeroizing::new(r_randomness.to_be_bytes()))
-      .add(&CG::mul(class_group.f(), &Zeroizing::new(crate::be_bytes(r_message.deref()))))
-      .compress(&mut *transcript)?;
+    CG::multiexp(
+      class_group.identity_p(),
+      &[
+        (Y, &Zeroizing::new(r_randomness.to_be_bytes())),
+        (class_group.f(), &Zeroizing::new(crate::be_bytes(r_message.deref()))),
+      ],
+    )
+    .compress(&mut *transcript)?;
 
     // Algorithm 1 ZKPoKRepS to prove the integrity of `U_i`
     // `k_0` according to the paper
@@ -111,9 +116,11 @@ impl<CG: Element, P: Parameters<CG>, Pr: Primes> RoundOneProofs<CG, P> for Ccykc
     // `k_1` according to the paper
     let k_u_i = Zeroizing::new(UnsignedInteger::random(B, &mut *rng));
     // Write `R` from the paper
-    CG::mul(G, &Zeroizing::new(k_beta_i.to_be_bytes()))
-      .add(&CG::mul(Y, &Zeroizing::new(k_u_i.to_be_bytes())))
-      .compress(&mut *transcript)?;
+    CG::multiexp(
+      class_group.identity_p(),
+      &[(G, &Zeroizing::new(k_beta_i.to_be_bytes())), (Y, &Zeroizing::new(k_u_i.to_be_bytes()))],
+    )
+    .compress(&mut *transcript)?;
 
     // Sample a challenge for both proofs
     // This is done as sampling the prime is presumed expensive, so reducing samples is appreciated
@@ -159,7 +166,8 @@ impl<CG: Element, P: Parameters<CG>, Pr: Primes> RoundOneProofs<CG, P> for Ccykc
       let (d_beta_i, e_beta_i) = s_beta_i.div_rem(&modulus);
       let (d_u_i, e_u_i) = s_u_i.div_rem(&modulus);
       // Write `D` from the paper
-      CG::mul(G, &d_beta_i).add(&CG::mul(Y, &d_u_i)).compress(&mut *transcript)?;
+      CG::multiexp(class_group.identity_p(), &[(G, &d_beta_i), (Y, &d_u_i)])
+        .compress(&mut *transcript)?;
       // Write `e_0` from the paper
       crate::ccykc::write_e(&mut *transcript, &modulus, e_beta_i)?;
       // Write `e_1` from the paper

@@ -166,10 +166,13 @@ impl<CG: Element, P: Parameters<CG>> SigningProtocol<CG, P> {
         let alpha_i_bytes = Zeroizing::new(alpha_i.to_be_bytes());
         let K_tilde_i = (
           CG::mul(setup.view().G(), &alpha_i_bytes),
-          CG::mul(setup.view().Y(), &alpha_i_bytes).add(&CG::mul(
-            setup.view().class_group().f(),
-            &Zeroizing::new(crate::be_bytes(nonce_i.deref())),
-          )),
+          CG::multiexp(
+            setup.view().class_group().identity_p(),
+            &[
+              (setup.view().Y(), &alpha_i_bytes),
+              (setup.view().class_group().f(), &Zeroizing::new(crate::be_bytes(nonce_i.deref()))),
+            ],
+          ),
         );
 
         // Write the ciphertext to our message
@@ -189,8 +192,13 @@ impl<CG: Element, P: Parameters<CG>> SigningProtocol<CG, P> {
           &mut *rng,
         ));
         let beta_i_bytes = Zeroizing::new(beta_i.to_be_bytes());
-        let U_i = CG::mul(setup.view().G(), &beta_i_bytes)
-          .add(&CG::mul(setup.view().Y(), &Zeroizing::new(crate::be_bytes(u_i.deref()))));
+        let U_i = CG::multiexp(
+          setup.view().class_group().identity_p(),
+          &[
+            (setup.view().G(), &beta_i_bytes),
+            (setup.view().Y(), &Zeroizing::new(crate::be_bytes(u_i.deref()))),
+          ],
+        );
 
         // Write the commitment to our message
         U_i.compress(&mut message).unwrap();
@@ -270,7 +278,7 @@ pub struct ObservingSigning<CG: Element, P: Parameters<CG>> {
   transcript: blake3::Hasher,
   R: P::E,
   K_tilde: (Table<CG>, Table<CG>),
-  U: Table<CG>,
+  neg_U: Table<CG>,
   lagrange_coefficients: HashMap<Participant, P::F>,
   K_tilde_i_0_U_i: HashMap<Participant, (CG, CG)>,
 }
@@ -430,10 +438,10 @@ impl<CG: Element, P: Parameters<CG>> Observing<CG, P> {
       }
       let K_tilde =
         table_scaled_decryption_ciphertext::<CG, P>(self.setup.class_group(), K_tilde.unwrap());
-      let U = Table::new_for_scalar_bits(
+      let neg_U = Table::new_for_scalar_bits(
         2 * usize::try_from(self.setup.class_group().unknown_order_bound() + 128).unwrap(),
         self.setup.class_group().identity_p().clone(),
-        U.unwrap(),
+        -U.unwrap(),
       );
 
       return Ready::Ready(ObservingSigning {
@@ -441,7 +449,7 @@ impl<CG: Element, P: Parameters<CG>> Observing<CG, P> {
         transcript: self.transcript,
         R: R.unwrap(),
         K_tilde,
-        U,
+        neg_U,
         lagrange_coefficients: signing_set
           .iter()
           .map(|participant| (*participant, dkg::lagrange::<P::F>(*participant, &signing_set)))
@@ -598,16 +606,20 @@ impl<CG: Element, P: Parameters<CG>> Signing<CG, P> {
 
     fn scaled_decryption<CG: Element, P: Parameters<CG>>(
       A_tilde: &(Table<CG>, Table<CG>),
-      B: &Table<CG>,
+      neg_B: &Table<CG>,
       alpha_i: &UnsignedInteger,
       beta_i: &UnsignedInteger,
       b_i: &<P as Parameters<CG>>::F,
     ) -> CG {
-      // TODO: Calculate this with a multiexp
-      let C_tilde_i_1 = CG::mul(&A_tilde.1, &Zeroizing::new(crate::be_bytes(b_i)));
-      let F_i = CG::mul(B, &Zeroizing::new(alpha_i.to_be_bytes()))
-        .sub(CG::mul(&A_tilde.0, &Zeroizing::new(beta_i.to_be_bytes())));
-      C_tilde_i_1.sub(F_i)
+      let identity = &neg_B[0];
+      CG::multiexp(
+        identity,
+        &[
+          (&A_tilde.1, &Zeroizing::new(crate::be_bytes(b_i))),
+          (neg_B, &Zeroizing::new(alpha_i.to_be_bytes())),
+          (&A_tilde.0, &Zeroizing::new(beta_i.to_be_bytes())),
+        ],
+      )
     }
 
     const PROTOCOL_ELEMENTS_SIZE_ESTIMATE: usize = 2 * 384;
@@ -627,7 +639,7 @@ impl<CG: Element, P: Parameters<CG>> Signing<CG, P> {
     // (H(m) + rx) * u
     scaled_decryption::<CG, P>(
       &aggregating.Z_tilde,
-      &aggregating.observing_signing.U,
+      &aggregating.observing_signing.neg_U,
       &delta_i,
       &self.beta_i,
       &self.u_i,
@@ -637,7 +649,7 @@ impl<CG: Element, P: Parameters<CG>> Signing<CG, P> {
     // k * u
     scaled_decryption::<CG, P>(
       &aggregating.observing_signing.K_tilde,
-      &aggregating.observing_signing.U,
+      &aggregating.observing_signing.neg_U,
       &self.alpha_i,
       &self.beta_i,
       &self.u_i,
@@ -652,7 +664,7 @@ impl<CG: Element, P: Parameters<CG>> Signing<CG, P> {
       self.setup.view().Y(),
       &aggregating.Z_tilde,
       &aggregating.observing_signing.K_tilde,
-      &aggregating.observing_signing.U,
+      &aggregating.observing_signing.neg_U,
       &delta_i,
       &self.alpha_i,
       &self.beta_i,
@@ -805,7 +817,7 @@ impl<CG: Element, P: Parameters<CG>> Aggregating<CG, P> {
           setup.Y(),
           &self.Z_tilde,
           &self.observing_signing.K_tilde,
-          &self.observing_signing.U,
+          &self.observing_signing.neg_U,
           Z_tilde_i_0,
           K_tilde_i_0,
           U_i,

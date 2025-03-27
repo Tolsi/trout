@@ -325,8 +325,10 @@ impl<CG: Element, P: Parameters<CG>> Setup<CG, P> {
           let mask = Zeroizing::new(mask.to_be_bytes());
           (
             CG::mul(&G, &mask),
-            CG::mul(&Y, &mask)
-              .add(&CG::mul(class_group.f(), &Zeroizing::new(crate::be_bytes(scalar)))),
+            CG::multiexp(
+              class_group.identity_p(),
+              &[(&Y, &mask), (class_group.f(), &Zeroizing::new(crate::be_bytes(scalar)))],
+            ),
           )
         })
       })

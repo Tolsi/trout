@@ -32,6 +32,8 @@ pub trait RoundTwoProofs<CG: Element, P: Parameters<CG>> {
   /// `G, Y, Z_tilde, K_tilde, U, Z_tilde_i_0, K_tilde_i_0, U_i`. This allows the proofs to
   /// not transcript these.
   ///
+  /// `neg_U` is `-U`.
+  ///
   /// If an error is returned, the state of `proof` is undefined.
   fn prove<W: io::Write>(
     rng: &mut (impl RngCore + CryptoRng),
@@ -40,7 +42,7 @@ pub trait RoundTwoProofs<CG: Element, P: Parameters<CG>> {
     Y: &Table<CG>,
     Z_tilde: &(Table<CG>, Table<CG>),
     K_tilde: &(Table<CG>, Table<CG>),
-    U: &Table<CG>,
+    neg_U: &Table<CG>,
     delta_i: &UnsignedInteger,
     alpha_i: &UnsignedInteger,
     beta_i: &UnsignedInteger,
@@ -53,6 +55,8 @@ pub trait RoundTwoProofs<CG: Element, P: Parameters<CG>> {
   /// This context must be the exact same as the prover used, causing the same bounds on what has
   /// already been transcripted.
   ///
+  /// `neg_U` is `-U`.
+  ///
   /// If an error is returned, `proof` is left in an undefined state.
   fn verify<R: io::Read>(
     class_group: &ClassGroup<CG>,
@@ -60,7 +64,7 @@ pub trait RoundTwoProofs<CG: Element, P: Parameters<CG>> {
     Y: &Table<CG>,
     Z_tilde: &(Table<CG>, Table<CG>),
     K_tilde: &(Table<CG>, Table<CG>),
-    U: &Table<CG>,
+    neg_U: &Table<CG>,
     Z_tilde_i_0: CG,
     K_tilde_i_0: CG,
     U_i: CG,
@@ -121,7 +125,7 @@ impl<CG: Element, P: Parameters<CG>, Pr: Primes> RoundTwoProofs<CG, P> for Ccykc
     Y: &Table<CG>,
     Z_tilde: &(Table<CG>, Table<CG>),
     K_tilde: &(Table<CG>, Table<CG>),
-    U: &Table<CG>,
+    neg_U: &Table<CG>,
     delta_i: &UnsignedInteger,
     alpha_i: &UnsignedInteger,
     beta_i: &UnsignedInteger,
@@ -152,17 +156,29 @@ impl<CG: Element, P: Parameters<CG>, Pr: Primes> RoundTwoProofs<CG, P> for Ccykc
     // Nonce commitments for each invocation
     CG::mul(G, &Zeroizing::new(r_delta_i.to_be_bytes())).compress(&mut *transcript)?;
     CG::mul(G, &Zeroizing::new(r_alpha_i.to_be_bytes())).compress(&mut *transcript)?;
-    CG::mul(G, &Zeroizing::new(r_beta_i.to_be_bytes()))
-      .add(&CG::mul(Y, &Zeroizing::new(r_u_i.to_be_bytes())))
-      .compress(&mut *transcript)?;
-    CG::mul(&Z_tilde.1, &Zeroizing::new(r_u_i.to_be_bytes()))
-      .sub(CG::mul(U, &Zeroizing::new(r_delta_i.to_be_bytes())))
-      .add(&CG::mul(&Z_tilde.0, &Zeroizing::new(r_beta_i.to_be_bytes())))
-      .compress(&mut *transcript)?;
-    CG::mul(&K_tilde.1, &Zeroizing::new(r_u_i.to_be_bytes()))
-      .sub(CG::mul(U, &Zeroizing::new(r_alpha_i.to_be_bytes())))
-      .add(&CG::mul(&K_tilde.0, &Zeroizing::new(r_beta_i.to_be_bytes())))
-      .compress(&mut *transcript)?;
+    CG::multiexp(
+      class_group.identity_p(),
+      &[(G, &Zeroizing::new(r_beta_i.to_be_bytes())), (Y, &Zeroizing::new(r_u_i.to_be_bytes()))],
+    )
+    .compress(&mut *transcript)?;
+    CG::multiexp(
+      class_group.identity_p(),
+      &[
+        (&Z_tilde.1, &Zeroizing::new(r_u_i.to_be_bytes())),
+        (neg_U, &Zeroizing::new(r_delta_i.to_be_bytes())),
+        (&Z_tilde.0, &Zeroizing::new(r_beta_i.to_be_bytes())),
+      ],
+    )
+    .compress(&mut *transcript)?;
+    CG::multiexp(
+      class_group.identity_p(),
+      &[
+        (&K_tilde.1, &Zeroizing::new(r_u_i.to_be_bytes())),
+        (neg_U, &Zeroizing::new(r_alpha_i.to_be_bytes())),
+        (&K_tilde.0, &Zeroizing::new(r_beta_i.to_be_bytes())),
+      ],
+    )
+    .compress(&mut *transcript)?;
 
     // Sample the challenge
     let c = P::from_xof(transcript.0.finalize_xof());
@@ -193,15 +209,18 @@ impl<CG: Element, P: Parameters<CG>, Pr: Primes> RoundTwoProofs<CG, P> for Ccykc
     // The `D` for each invocation
     CG::mul(G, &d_delta_i).compress(&mut *transcript)?;
     CG::mul(G, &d_alpha_i).compress(&mut *transcript)?;
-    CG::mul(G, &d_beta_i).add(&CG::mul(Y, &d_u_i)).compress(&mut *transcript)?;
-    CG::mul(&Z_tilde.1, &d_u_i)
-      .sub(CG::mul(U, &d_delta_i))
-      .add(&CG::mul(&Z_tilde.0, &d_beta_i))
+    CG::multiexp(class_group.identity_p(), &[(G, &d_beta_i), (Y, &d_u_i)])
       .compress(&mut *transcript)?;
-    CG::mul(&K_tilde.1, &d_u_i)
-      .sub(CG::mul(U, &d_alpha_i))
-      .add(&CG::mul(&K_tilde.0, &d_beta_i))
-      .compress(&mut *transcript)?;
+    CG::multiexp(
+      class_group.identity_p(),
+      &[(&Z_tilde.1, &d_u_i), (neg_U, &d_delta_i), (&Z_tilde.0, &d_beta_i)],
+    )
+    .compress(&mut *transcript)?;
+    CG::multiexp(
+      class_group.identity_p(),
+      &[(&K_tilde.1, &d_u_i), (neg_U, &d_alpha_i), (&K_tilde.0, &d_beta_i)],
+    )
+    .compress(&mut *transcript)?;
 
     // Each `e`
     crate::ccykc::write_e(&mut *transcript, &modulus, e_delta_i)?;
@@ -216,7 +235,7 @@ impl<CG: Element, P: Parameters<CG>, Pr: Primes> RoundTwoProofs<CG, P> for Ccykc
     Y: &Table<CG>,
     Z_tilde: &(Table<CG>, Table<CG>),
     K_tilde: &(Table<CG>, Table<CG>),
-    U: &Table<CG>,
+    neg_U: &Table<CG>,
     Z_tilde_i_0: CG,
     K_tilde_i_0: CG,
     U_i: CG,
@@ -273,7 +292,7 @@ impl<CG: Element, P: Parameters<CG>, Pr: Primes> RoundTwoProofs<CG, P> for Ccykc
 
     if CG::mul_once(class_group.identity_p().clone(), D_ZU_i, &modulus_bytes)
       .add(&CG::mul(&Z_tilde.1, &e_u_i))
-      .add(&CG::mul(U, &e_delta_i))
+      .add(&CG::mul(neg_U, &e_delta_i))
       .add(&CG::mul(&Z_tilde.0, &e_beta_i)) !=
       R_ZU_i.add(&CG::mul_once(class_group.identity_p().clone(), ZU_i, &c))
     {
@@ -282,7 +301,7 @@ impl<CG: Element, P: Parameters<CG>, Pr: Primes> RoundTwoProofs<CG, P> for Ccykc
 
     if CG::mul_once(class_group.identity_p().clone(), D_KU_i, &modulus_bytes)
       .add(&CG::mul(&K_tilde.1, &e_u_i))
-      .add(&CG::mul(U, &e_alpha_i))
+      .add(&CG::mul(neg_U, &e_alpha_i))
       .add(&CG::mul(&K_tilde.0, &e_beta_i)) !=
       R_KU_i.add(&CG::mul_once(class_group.identity_p().clone(), KU_i, &c))
     {
