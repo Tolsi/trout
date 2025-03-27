@@ -191,6 +191,11 @@ pub use gmp_primes::*;
 pub(crate) mod ccykc {
   use std::io::{self, Read, Write};
 
+  use ::malachite::{
+    base::num::{conversion::traits::*, logic::traits::*},
+    *,
+  };
+
   use super::*;
 
   pub(crate) const LAMBDA: u32 = 128;
@@ -231,14 +236,31 @@ pub(crate) mod ccykc {
     transcript.write_all(e_bytes)
   }
 
+  pub(crate) fn natural_from_bytes(bytes: &[u8]) -> Natural {
+    Natural::from_digits_desc(&256u16, bytes.iter().map(|b| (*b).into())).unwrap()
+  }
+  pub(crate) fn natural_to_bytes(value: &Natural) -> Vec<u8> {
+    let mut res = value
+      .to_digits_desc(&256u16)
+      .into_iter()
+      .map(|byte| byte.try_into().unwrap())
+      .collect::<Vec<_>>();
+    // This *should* never trigger in a sane-world, yet ensures we never make a non-canonical
+    // encoding
+    while res.first() == Some(&0) {
+      res.remove(0);
+    }
+    res
+  }
+
   pub(crate) fn read_e<R: Read>(
     transcript: &mut DigestReader<R>,
-    modulus: &crypto_bigint::NonZero<crypto_bigint::BoxedUint>,
-  ) -> io::Result<UnsignedInteger> {
-    let mut e = vec![0; modulus.bits().div_ceil(8).try_into().unwrap()];
+    modulus: &Natural,
+  ) -> io::Result<Natural> {
+    let mut e = vec![0; modulus.significant_bits().div_ceil(8).try_into().unwrap()];
     transcript.read_exact(&mut e)?;
-    let e_int = UnsignedInteger::from_be_slice(&e);
-    if e_int.0 > **modulus {
+    let e_int = natural_from_bytes(&e);
+    if e_int > *modulus {
       Err(io::Error::other("unreduced e"))?;
     }
     Ok(e_int)

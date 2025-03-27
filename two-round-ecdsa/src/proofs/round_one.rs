@@ -4,6 +4,11 @@ use std::io::{self, Read, Write};
 use zeroize::Zeroizing;
 use rand_core::{RngCore, CryptoRng};
 
+use ::malachite::{
+  base::num::{arithmetic::traits::*, basic::traits::*, conversion::traits::*},
+  *,
+};
+
 use group::{
   ff::{Field, PrimeField},
   Group, GroupEncoding,
@@ -78,12 +83,12 @@ pub trait RoundOneProofs<CG: Element, P: Parameters<CG>> {
 
 /// The batch verifier for `Ccykc2023RoundOne`.
 pub struct Ccykc2023RoundOneBatchVerifier<CG: Element, P: Parameters<CG>> {
-  G: UnsignedInteger,
-  Y: UnsignedInteger,
+  G: Natural,
+  Y: Natural,
   H: P::F,
   E: P::F,
   additional_elliptic_curve: Vec<(P::F, P::E)>,
-  additional_class_group: Vec<(CG, UnsignedInteger)>,
+  additional_class_group: Vec<(CG, Natural)>,
 }
 
 /// Proofs from Cui, Chan, Yuen, Kang, and Chu's Bandwidth-Efficient Zero-Knowledge Proofs for
@@ -193,8 +198,8 @@ impl<CG: Element, P: Parameters<CG>, Pr: Primes> RoundOneProofs<CG, P> for Ccykc
 
   fn batch_verifier(proofs: usize) -> Self::BatchVerifier {
     Ccykc2023RoundOneBatchVerifier {
-      G: UnsignedInteger::zero(),
-      Y: UnsignedInteger::zero(),
+      G: Natural::ZERO,
+      Y: Natural::ZERO,
       H: P::F::ZERO,
       E: P::F::ZERO,
       additional_elliptic_curve: Vec::with_capacity(2 * proofs),
@@ -223,18 +228,28 @@ impl<CG: Element, P: Parameters<CG>, Pr: Primes> RoundOneProofs<CG, P> for Ccykc
     let c = P::from_xof(transcript.0.finalize_xof());
     transcript.0.update(&[0]);
     let prime = Pr::prime(crate::ccykc::LAMBDA, transcript.0.finalize_xof());
+    let prime = crate::ccykc::natural_from_bytes(&prime.to_be_bytes());
 
-    let c_uint = UnsignedInteger::from_be_slice(&crate::be_bytes(&c));
-    let modulus = (&prime * &UnsignedInteger::from_be_slice(class_group.p())).0;
-    let non_zero_modulus = crypto_bigint::NonZero::new(modulus.clone()).unwrap();
+    let c_uint = crate::ccykc::natural_from_bytes(&crate::be_bytes(&c));
+    let modulus = crate::ccykc::natural_from_bytes(class_group.p()) * &prime;
 
     // ZKPoKLog response
-    {
-      let mut s_message = <P::F as PrimeField>::Repr::default();
-      transcript.read_exact(s_message.as_mut())?;
-      let s_message = Option::<P::F>::from(P::F::from_repr(s_message))
-        .ok_or_else(|| io::Error::other("invalid s_message"))?;
+    let mut s_message = <P::F as PrimeField>::Repr::default();
+    transcript.read_exact(s_message.as_mut())?;
+    let s_message = Option::<P::F>::from(P::F::from_repr(s_message))
+      .ok_or_else(|| io::Error::other("invalid s_message"))?;
 
+    let D_randomness_commitment = class_group.decompress_p(&mut *transcript)?;
+    let D_ciphertext = class_group.decompress_p(&mut *transcript)?;
+    let e_randomness = crate::ccykc::read_e(&mut *transcript, &modulus)?;
+
+    // ZKPoKRepS response
+    let D_U = class_group.decompress_p(&mut *transcript)?;
+    let e_beta_i = crate::ccykc::read_e(&mut *transcript, &modulus)?;
+    let e_u_i = crate::ccykc::read_e(&mut *transcript, &modulus)?;
+
+    // ZKPoKLog accumulation
+    {
       {
         let weight = P::F::random(&mut *rng);
         batch_verifier.additional_elliptic_curve.push((weight, R_message));
@@ -242,12 +257,11 @@ impl<CG: Element, P: Parameters<CG>, Pr: Primes> RoundOneProofs<CG, P> for Ccykc
         batch_verifier.E -= weight * s_message;
       }
 
-      let D_randomness_commitment = class_group.decompress_p(&mut *transcript)?;
-      let D_ciphertext = class_group.decompress_p(&mut *transcript)?;
-      let e_randomness = crate::ccykc::read_e(&mut *transcript, &non_zero_modulus)?;
-
       {
-        let weight = UnsignedInteger::random(128, &mut *rng);
+        let mut weight = [0; 16];
+        rng.fill_bytes(&mut weight);
+        let weight = crate::ccykc::natural_from_bytes(&weight);
+
         batch_verifier.additional_class_group.push((D_randomness_commitment, &weight * &modulus));
         batch_verifier.G += &weight * &e_randomness;
 
@@ -257,7 +271,7 @@ impl<CG: Element, P: Parameters<CG>, Pr: Primes> RoundOneProofs<CG, P> for Ccykc
 
       {
         let weight_scalar = P::F::random(&mut *rng);
-        let weight = UnsignedInteger::from_be_slice(&crate::be_bytes(&weight_scalar));
+        let weight = crate::ccykc::natural_from_bytes(&crate::be_bytes(&weight_scalar));
         batch_verifier.additional_class_group.push((D_ciphertext, &weight * &modulus));
         batch_verifier.Y += &weight * &e_randomness;
         batch_verifier.H += weight_scalar * s_message;
@@ -267,13 +281,11 @@ impl<CG: Element, P: Parameters<CG>, Pr: Primes> RoundOneProofs<CG, P> for Ccykc
       }
     }
 
-    // ZKPoKRepS response
+    // ZKPoKRepS accumulation
     {
-      let D_U = class_group.decompress_p(&mut *transcript)?;
-      let e_beta_i = crate::ccykc::read_e(&mut *transcript, &non_zero_modulus)?;
-      let e_u_i = crate::ccykc::read_e(&mut *transcript, &non_zero_modulus)?;
-
-      let weight = UnsignedInteger::random(128, &mut *rng);
+      let mut weight = [0; 16];
+      rng.fill_bytes(&mut weight);
+      let weight = crate::ccykc::natural_from_bytes(&weight);
 
       batch_verifier.additional_class_group.push((D_U, &weight * &modulus));
       batch_verifier.G += &weight * &e_beta_i;
@@ -293,12 +305,12 @@ impl<CG: Element, P: Parameters<CG>, Pr: Primes> RoundOneProofs<CG, P> for Ccykc
     batch_verifier: Self::BatchVerifier,
   ) -> Result<(), Vec<dkg::Participant>> {
     {
-      let G_scalar = batch_verifier.G.to_be_bytes();
-      let Y_scalar = batch_verifier.Y.to_be_bytes();
+      let G_scalar = crate::ccykc::natural_to_bytes(&batch_verifier.G);
+      let Y_scalar = crate::ccykc::natural_to_bytes(&batch_verifier.Y);
       let H_scalar = crate::be_bytes(&batch_verifier.H);
       let mut additional = Vec::with_capacity(batch_verifier.additional_class_group.len());
       for (point, scalar) in batch_verifier.additional_class_group {
-        let bytes = scalar.to_be_bytes();
+        let bytes = crate::ccykc::natural_to_bytes(&scalar);
         additional.push((
           Table::new_for_scalar_bits(bytes.len() * 8, class_group.identity_p().clone(), point),
           bytes,

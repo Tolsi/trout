@@ -11,10 +11,6 @@ use crypto_bigint::{NonZero, BoxedUint};
 pub struct UnsignedInteger(pub(crate) BoxedUint);
 
 impl UnsignedInteger {
-  pub(crate) fn zero() -> Self {
-    Self(BoxedUint::zero())
-  }
-
   #[must_use]
   pub(crate) fn to_be_bytes(&self) -> Box<[u8]> {
     self.0.to_be_bytes()
