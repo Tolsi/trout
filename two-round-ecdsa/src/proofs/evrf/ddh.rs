@@ -723,7 +723,7 @@ impl<
       .statement(global_setup.generators.reduce(muls).unwrap(), commitments)
       .unwrap()
       .0
-      .verify(rng, batch_verifier, &mut bp_transcript)
+      .verify(&mut *rng, batch_verifier, &mut bp_transcript)
       .map_err(|e| io::Error::other(format!("{e:?}")))?;
 
     // The Pedersen commitment for the nonce
@@ -735,16 +735,24 @@ impl<
       let R_nonce = P::read_canonical_E(&mut *transcript)?;
       let R_nonce_mask = P::read_canonical_E(&mut *transcript)?;
       let c = P::from_xof(transcript.0.finalize_xof());
-      let s_nonce = C::read_F(&mut *transcript)?;
-      let s_nonce_mask = C::read_F(&mut *transcript)?;
-      // TODO: Batch verify these PoKs
-      if (R_nonce + (Y_apostrophe * c)) != (global_setup.generators.g() * s_nonce) {
-        Err(io::Error::other("invalid PoK for Y'"))?;
-      }
-      if R_nonce_mask + ((Y_commitment - Y_apostrophe) * c) !=
-        (global_setup.generators.h() * s_nonce_mask)
+
       {
-        Err(io::Error::other("invalid PoK for Y - Y'"))?;
+        let s_nonce = C::read_F(&mut *transcript)?;
+        let weight = C::F::random(&mut *rng);
+        // R
+        batch_verifier.additional.push((weight, R_nonce));
+        // + cX
+        batch_verifier.additional.push((weight * c, Y_apostrophe));
+        // - sG == 0
+        batch_verifier.g -= weight * s_nonce;
+      }
+
+      {
+        let s_nonce_mask = C::read_F(&mut *transcript)?;
+        let weight = C::F::random(&mut *rng);
+        batch_verifier.additional.push((weight, R_nonce_mask));
+        batch_verifier.additional.push((weight * c, (Y_commitment - Y_apostrophe)));
+        batch_verifier.h -= weight * s_nonce_mask;
       }
     }
 
