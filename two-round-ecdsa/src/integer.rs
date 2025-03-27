@@ -35,10 +35,12 @@ impl UnsignedInteger {
 
   #[must_use]
   pub(crate) fn div_rem(&self, denominator: &NonZero<BoxedUint>) -> (Zeroizing<Box<[u8]>>, Self) {
+    let denominator_bits = denominator.bits_precision();
     let denominator = denominator.widen(self.0.bits_precision());
     let (d, e) = self.0.div_rem(&denominator);
     let d = Zeroizing::new(d);
     let d = Zeroizing::new(d.to_be_bytes());
+    let e = e.shorten(denominator_bits);
     (d, Self(e))
   }
 }
