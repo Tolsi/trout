@@ -32,7 +32,7 @@ pub(crate) struct ToLeBits<F: PrimeFieldBits> {
 impl<F: PrimeFieldBits> Iterator for ToLeBits<F> {
   type Item = Choice;
   fn next(&mut self) -> Option<Choice> {
-    if self.i > usize::try_from(F::NUM_BITS).unwrap() {
+    if self.i >= usize::try_from(F::NUM_BITS).unwrap() {
       None?;
     }
     let mut bit_raw = self.underlying.get_mut(self.i).unwrap();
@@ -107,8 +107,7 @@ impl<CG: Element, P: Primes> Parameters<CG> for Secp256k1<CG, P> {
   type E = k256::ProjectivePoint;
   type F = k256::Scalar;
 
-  // TODO: Use a proper eVRF
-  type Evrf = DummyEvrf;
+  type Evrf = DdhEvrf<ciphersuite::Secp256k1, secq256k1::Point>;
   type RoundOneProofs = Ccykc2023RoundOne<P>;
   type RoundTwoProofs = Ccykc2023RoundTwo<P>;
 

@@ -5,8 +5,9 @@ use class_groups::{Element, ClassGroup};
 
 use crate::UnsignedInteger;
 
-mod evrf;
-pub use evrf::*;
+/// The eVRF trait and provided implementations.
+pub mod evrf;
+pub(crate) use evrf::*;
 
 mod round_one;
 pub use round_one::*;
@@ -117,8 +118,8 @@ mod crypto_primes {
     }
   }
 
-  /// CryptoPrimesStack, guaranteed to not panic when used with this library's Ccyck* proofs.
-  pub type CryptoPrimesStackCcyck = CryptoPrimesStack<crypto_bigint::U128>;
+  /// CryptoPrimesStack, guaranteed to not panic when used with this library's Ccykc* proofs.
+  pub type CryptoPrimesStackCcykc = CryptoPrimesStack<crypto_bigint::U128>;
 
   /// A source of primes premised on crypto-primes.
   ///

@@ -7,7 +7,7 @@ fn sign() {
   #[cfg(not(feature = "gmp"))]
   type Element = class_groups::MalachiteElement;
   #[cfg(not(feature = "gmp"))]
-  type Primes = two_round_ecdsa::proofs::CryptoPrimesStackCcyck;
+  type Primes = two_round_ecdsa::proofs::CryptoPrimesStackCcykc;
   #[cfg(feature = "gmp")]
   type Element = class_groups::GmpElement;
   #[cfg(feature = "gmp")]
@@ -37,8 +37,12 @@ fn sign() {
     );
   println!("Participated!");
 
-  let Ready::Ready(first) = first.accumulate(second_i, second_message) else { panic!() };
-  let Ready::Ready(second) = second.accumulate(first_i, first_message) else { panic!() };
+  let Ready::Ready(first) = first.accumulate(&mut OsRng, second_i, second_message) else {
+    panic!()
+  };
+  let Ready::Ready(second) = second.accumulate(&mut OsRng, first_i, first_message) else {
+    panic!()
+  };
   println!("Accumulated!");
 
   const MESSAGE: &[u8] = b"Hello, World!";

@@ -1,4 +1,4 @@
-use std::io;
+use std::io::{self, Write};
 
 use zeroize::Zeroizing;
 use rand_core::{RngCore, CryptoRng};
@@ -6,7 +6,11 @@ use rand_core::{RngCore, CryptoRng};
 use group::{ff::Field, Group, GroupEncoding};
 use class_groups::Element;
 
-use crate::Parameters;
+/// The DDH-premised eVRF.
+pub mod ddh;
+pub(crate) use ddh::*;
+
+use crate::{DigestReader, DigestWriter, Parameters};
 
 /// An eVRF.
 ///
@@ -19,15 +23,31 @@ use crate::Parameters;
 ///
 /// The eVRF used is left to the choice of the caller.
 pub trait Evrf<CG: Element, P: Parameters<CG>> {
+  /// A global setup for invocations of the eVRF.
+  type GlobalSetup: Clone;
   /// The view of someone's setup, as necessary to verify someone's invocation of the eVRF.
   type SetupView: Clone;
   /// The setup, as necessary to invoke the eVRF.
   type Setup;
-  /// The batch verifier for eVRFs.use core::marker::PhantomData;
+  /// The context for an eVRF invocation.
+  type Context;
+  /// The batch verifier for eVRFs.
   type BatchVerifier;
 
-  /// Perform the setup for the eVRF.
-  fn setup(rng: &mut (impl RngCore + CryptoRng)) -> (Self::SetupView, Self::Setup);
+  /// Perform the global setup for the eVRF.
+  fn global_setup() -> Self::GlobalSetup;
+
+  /// Perform the per-participant setup for the eVRF.
+  fn setup(
+    global_setup: &Self::GlobalSetup,
+    rng: &mut (impl RngCore + CryptoRng),
+  ) -> (Self::SetupView, Self::Setup);
+
+  /// Create the context for the eVRF invocation.
+  ///
+  /// If this function draws from the transcript, it MUST also advance it to ensure future draws
+  /// don't yield the same values.
+  fn context(global_setup: &Self::GlobalSetup, transcript: &mut blake3::Hasher) -> Self::Context;
 
   /// Invoke the eVRF to obtain a random value.
   ///
@@ -36,15 +56,16 @@ pub trait Evrf<CG: Element, P: Parameters<CG>> {
   ///
   /// The proof is written to `proof`. If this function returns an error, the status of `proof` is
   /// undefined.
-  fn prove(
+  fn prove<W: io::Write>(
     rng: &mut (impl RngCore + CryptoRng),
+    global_setup: &Self::GlobalSetup,
     setup: &Self::Setup,
-    context: [u8; 32],
-    proof: impl io::Write,
+    context: &Self::Context,
+    transcript: &mut DigestWriter<W>,
   ) -> io::Result<Zeroizing<P::F>>;
 
   /// Create a batch verifier of eVRFs.
-  fn batch_verifier() -> Self::BatchVerifier;
+  fn batch_verifier(global_setup: &Self::GlobalSetup) -> Self::BatchVerifier;
   /// Queue verification of someone's invocation of the eVRF.
   ///
   /// Returns the commitment to the value over the generator of the elliptic curve. This commitment
@@ -54,17 +75,22 @@ pub trait Evrf<CG: Element, P: Parameters<CG>> {
   /// If an error is returned, `proof` is left in an undefined state. The batch verifier is
   /// guaranteed to not be mutated however, meaning a proof which raises an error while being
   /// queued will not corrupt the batch verifier and will leave it eligible to verify other proofs.
-  fn queue_verification(
+  fn queue_verification<R: io::Read>(
+    rng: &mut (impl RngCore + CryptoRng),
+    global_setup: &Self::GlobalSetup,
     batch_verifier: &mut Self::BatchVerifier,
     participant: dkg::Participant,
     setup: &Self::SetupView,
-    context: [u8; 32],
-    proof: impl io::Read,
+    context: &Self::Context,
+    transcript: &mut DigestReader<R>,
   ) -> io::Result<P::E>;
   /// Verify all proofs within the batch verifier.
   ///
   /// Returns `Ok(())` or a list of *all* of the *faulty* participants.
-  fn verify(batch_verifier: Self::BatchVerifier) -> Result<(), Vec<dkg::Participant>>;
+  fn verify(
+    global_setup: &Self::GlobalSetup,
+    batch_verifier: Self::BatchVerifier,
+  ) -> Result<(), Vec<dkg::Participant>>;
 }
 
 /// A dummy eVRF which does not perform any proof and accordingly isn't verifiable.
@@ -75,39 +101,57 @@ pub trait Evrf<CG: Element, P: Parameters<CG>> {
 /// <https://eprint.iacr.org/2021/1449> implies the security of).
 pub struct DummyEvrf;
 impl<CG: Element, P: Parameters<CG>> Evrf<CG, P> for DummyEvrf {
+  type GlobalSetup = ();
   type SetupView = ();
   type Setup = ();
+  type Context = ();
   type BatchVerifier = ();
 
-  fn setup(_rng: &mut (impl RngCore + CryptoRng)) -> (Self::SetupView, Self::Setup) {
+  fn global_setup() -> Self::GlobalSetup {
+    ()
+  }
+
+  fn setup(
+    _global_setup: &Self::GlobalSetup,
+    _rng: &mut (impl RngCore + CryptoRng),
+  ) -> (Self::SetupView, Self::Setup) {
     ((), ())
   }
 
-  fn batch_verifier() -> Self::BatchVerifier {}
+  fn context(_global_setup: &Self::GlobalSetup, _transcript: &mut blake3::Hasher) -> Self::Context {
+  }
 
-  fn prove(
+  fn batch_verifier(_global_setup: &Self::GlobalSetup) -> Self::BatchVerifier {}
+
+  fn prove<W: io::Write>(
     rng: &mut (impl RngCore + CryptoRng),
+    _global_setup: &Self::GlobalSetup,
     _setup: &Self::Setup,
-    _context: [u8; 32],
-    mut proof: impl io::Write,
+    _context: &Self::Context,
+    transcript: &mut DigestWriter<W>,
   ) -> io::Result<Zeroizing<P::F>> {
     let nonce = Zeroizing::new(P::F::random(rng));
     let nonce_commitment = P::E::generator() * *nonce;
-    proof.write_all(nonce_commitment.to_bytes().as_ref())?;
+    transcript.write_all(nonce_commitment.to_bytes().as_ref())?;
     Ok(nonce)
   }
 
-  fn queue_verification(
+  fn queue_verification<R: io::Read>(
+    _rng: &mut (impl RngCore + CryptoRng),
+    _global_setup: &Self::GlobalSetup,
     _batch_verifier: &mut Self::BatchVerifier,
     _participant: dkg::Participant,
     _setup: &Self::SetupView,
-    _context: [u8; 32],
-    proof: impl io::Read,
+    _context: &Self::Context,
+    transcript: &mut DigestReader<R>,
   ) -> io::Result<P::E> {
-    P::read_canonical_E(proof)
+    P::read_canonical_E(transcript)
   }
 
-  fn verify(_batch_verifier: Self::BatchVerifier) -> Result<(), Vec<dkg::Participant>> {
+  fn verify(
+    _global_setup: &Self::GlobalSetup,
+    _batch_verifier: Self::BatchVerifier,
+  ) -> Result<(), Vec<dkg::Participant>> {
     Ok(())
   }
 }

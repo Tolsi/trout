@@ -20,15 +20,6 @@ use crate::{
   SetupView, Setup,
 };
 
-/// Sample a context hash.
-// TODO: Remove this solely for DigestReader/DigestWriter
-fn context(hasher: &mut blake3::Hasher) -> [u8; 32] {
-  let hash = hasher.finalize();
-  // Advance the hasher so future samples are distinct
-  hasher.update(&[0]);
-  hash.into()
-}
-
 /// Table a ciphertext for scaled decryption.
 ///
 /// This just yields the presumably-optimal table sizes.
@@ -62,6 +53,7 @@ pub struct SigningProtocol<CG: Element, P: Parameters<CG>>(PhantomData<(CG, P)>)
 pub struct Observing<CG: Element, P: Parameters<CG>> {
   setup: Arc<SetupView<CG, P>>,
   transcript: blake3::Hasher,
+  evrf_context: <P::Evrf as Evrf<CG, P>>::Context,
   accumulated: HashMap<Participant, (blake3::Hasher, P::E, (CG, CG), CG)>,
   faulty: HashSet<Participant>,
   pending: HashMap<Participant, Vec<u8>>,
@@ -157,9 +149,14 @@ impl<CG: Element, P: Parameters<CG>> SigningProtocol<CG, P> {
 
       let (alpha_i, nonce_i) = {
         // Sample the nonce
-        let evrf_context = context(&mut message.0);
-        let nonce_i =
-          P::Evrf::prove(&mut *rng, setup.evrf_setup(), evrf_context, &mut message).unwrap();
+        let nonce_i = P::Evrf::prove(
+          &mut *rng,
+          setup.view().evrf_global_setup(),
+          setup.evrf_setup(),
+          &observing.evrf_context,
+          &mut message,
+        )
+        .unwrap();
 
         // Create the ciphertext for it
         let alpha_i = Zeroizing::new(UnsignedInteger::random(
@@ -218,7 +215,7 @@ impl<CG: Element, P: Parameters<CG>> SigningProtocol<CG, P> {
     };
 
     // Because this is the view if we're participating, accumulate our own participation
-    match observing.accumulate(setup.i(), message.clone()) {
+    match observing.accumulate(rng, setup.i(), message.clone()) {
       Ready::Ready(_) => unreachable!("t == 1 barred at setup"),
       Ready::NotReady((observing_, error)) => {
         observing = observing_;
@@ -234,9 +231,11 @@ impl<CG: Element, P: Parameters<CG>> SigningProtocol<CG, P> {
     let mut transcript = setup.transcript();
     transcript.update(&session_id);
 
+    let evrf_context = P::Evrf::context(setup.evrf_global_setup(), &mut transcript);
     Observing {
       setup,
       transcript,
+      evrf_context,
       accumulated: HashMap::new(),
       faulty: HashSet::new(),
       pending: HashMap::new(),
@@ -292,6 +291,7 @@ impl<CG: Element, P: Parameters<CG>> Observing<CG, P> {
   /// behavior.
   pub fn accumulate(
     mut self,
+    rng: &mut (impl RngCore + CryptoRng),
     participant: Participant,
     message: Vec<u8>,
   ) -> Ready<(Self, Option<RoundOneError>), ObservingSigning<CG, P>> {
@@ -316,18 +316,19 @@ impl<CG: Element, P: Parameters<CG>> Observing<CG, P> {
       let mut messages = HashMap::with_capacity(self.pending.len());
 
       // Prepare the batch verifications
-      let mut evrf_batch_verifier = P::Evrf::batch_verifier();
+      let mut evrf_batch_verifier = P::Evrf::batch_verifier(self.setup.evrf_global_setup());
       let mut round_one_batch_verifier = P::RoundOneProofs::batch_verifier();
       for (participant, message) in self.pending.drain() {
         let message = message.as_slice();
         let mut message = DigestReader(self.transcript.clone(), message);
 
-        let evrf_context = context(&mut message.0);
         let Ok(R_i) = P::Evrf::queue_verification(
+          rng,
+          self.setup.evrf_global_setup(),
           &mut evrf_batch_verifier,
           participant,
           self.setup.evrf_setup(&participant).unwrap(),
-          evrf_context,
+          &self.evrf_context,
           &mut message,
         ) else {
           faulty.insert(participant);
@@ -367,7 +368,7 @@ impl<CG: Element, P: Parameters<CG>> Observing<CG, P> {
       }
 
       // Perform the batch verifications
-      match P::Evrf::verify(evrf_batch_verifier) {
+      match P::Evrf::verify(self.setup.evrf_global_setup(), evrf_batch_verifier) {
         Ok(()) => {}
         Err(faults) => {
           for fault in faults {
@@ -475,10 +476,11 @@ impl<CG: Element, P: Parameters<CG>> Participating<CG, P> {
   /// and is accordingly subject to the long commentary present on `SigningProtocol::participate`.
   pub fn accumulate(
     mut self,
+    rng: &mut (impl RngCore + CryptoRng),
     participant: Participant,
     message: Vec<u8>,
   ) -> Ready<(Self, Option<RoundOneError>), Signing<CG, P>> {
-    match self.observing.accumulate(participant, message) {
+    match self.observing.accumulate(rng, participant, message) {
       Ready::Ready(observing_signing) => Ready::Ready(Signing {
         setup: self.setup,
         alpha_i: self.alpha_i,

@@ -27,7 +27,7 @@ provided in the codebase:
    [`crypto-primes`](https://docs.rs/crypto-primes). This isn't safe per
    <https://github.com/entropyxyz/crypto-primes/issues/23> and
    <https://github.com/entropyxyz/crypto-primes/issues/25>. Additionally, this implementation may
-   panic if too large a prime is requested (though `CryptoPrimesStackCcyck` is guaranteed to not
+   panic if too large a prime is requested (though `CryptoPrimesStackCcykc` is guaranteed to not
    panic with `Ccykc2023RoundOne` and `Ccykc2023RoundTwo`).
 2) `CryptoPrimesHeap`: A hash-to-prime internally using
    [`crypto-primes`](https://docs.rs/crypto-primes), again unsafe per the prior reasons. It won't

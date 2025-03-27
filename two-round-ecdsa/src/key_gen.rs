@@ -100,6 +100,7 @@ pub struct SetupView<CG: Element, P: Parameters<CG>> {
   Y: Table<CG>,
   verification_key: P::E,
   // verification_shares: HashMap<Participant, P::E>,
+  evrf_global_setup: <P::Evrf as Evrf<CG, P>>::GlobalSetup,
   evrf_setups: HashMap<Participant, <P::Evrf as Evrf<CG, P>>::SetupView>,
   share_ciphertexts: HashMap<Participant, (Table<CG>, Table<CG>)>,
 
@@ -172,6 +173,7 @@ impl<CG: Element, P: Parameters<CG>> SetupView<CG, P> {
       G,
       Y,
       verification_key,
+      evrf_global_setup: P::Evrf::global_setup(),
       evrf_setups,
       share_ciphertexts,
       transcript,
@@ -196,6 +198,9 @@ impl<CG: Element, P: Parameters<CG>> SetupView<CG, P> {
   /// The ECDSA verification key.
   pub fn verification_key(&self) -> P::E {
     self.verification_key
+  }
+  pub(crate) fn evrf_global_setup(&self) -> &<P::Evrf as Evrf<CG, P>>::GlobalSetup {
+    &self.evrf_global_setup
   }
   pub(crate) fn evrf_setup(
     &self,
@@ -278,11 +283,12 @@ impl<CG: Element, P: Parameters<CG>> Setup<CG, P> {
     // Set the verification key
     let verification_key = P::E::generator() * coeffs[0];
 
+    let evrf_global_setup = P::Evrf::global_setup();
     let mut evrf_setup_views = HashMap::new();
     let mut evrf_setups = HashMap::new();
     let mut share_ciphertext_openings = HashMap::new();
     for participant in (1 ..= n).map(|i| Participant::new(i).unwrap()) {
-      let (setup_view, setup) = P::Evrf::setup(&mut *rng);
+      let (setup_view, setup) = P::Evrf::setup(&evrf_global_setup, &mut *rng);
       evrf_setup_views.insert(participant, setup_view);
       evrf_setups.insert(participant, setup);
 
