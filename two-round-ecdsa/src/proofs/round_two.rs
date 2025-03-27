@@ -4,6 +4,8 @@ use std::io;
 use zeroize::Zeroizing;
 use rand_core::{RngCore, CryptoRng};
 
+use ::malachite::{base::num::logic::traits::*, *};
+
 use class_groups::{Element, Table, ClassGroup};
 
 use crate::{UnsignedInteger, DigestReader, DigestWriter, Primes, Parameters};
@@ -59,6 +61,7 @@ pub trait RoundTwoProofs<CG: Element, P: Parameters<CG>> {
   ///
   /// If an error is returned, `proof` is left in an undefined state.
   fn verify<R: io::Read>(
+    rng: &mut (impl RngCore + CryptoRng),
     class_group: &ClassGroup<CG>,
     G: &Table<CG>,
     Y: &Table<CG>,
@@ -97,6 +100,7 @@ impl<CG: Element, P: Parameters<CG>> RoundTwoProofs<CG, P> for NoIdentifiableAbo
   }
 
   fn verify<R: io::Read>(
+    _rng: &mut (impl RngCore + CryptoRng),
     _class_group: &ClassGroup<CG>,
     _G: &Table<CG>,
     _Y: &Table<CG>,
@@ -231,6 +235,7 @@ impl<CG: Element, P: Parameters<CG>, Pr: Primes> RoundTwoProofs<CG, P> for Ccykc
   }
 
   fn verify<R: io::Read>(
+    rng: &mut (impl RngCore + CryptoRng),
     class_group: &ClassGroup<CG>,
     G: &Table<CG>,
     Y: &Table<CG>,
@@ -251,12 +256,11 @@ impl<CG: Element, P: Parameters<CG>, Pr: Primes> RoundTwoProofs<CG, P> for Ccykc
     let R_KU_i = class_group.decompress_p(&mut *transcript)?;
 
     let c = P::from_xof(transcript.0.finalize_xof());
-    let c = crate::be_bytes(&c);
     transcript.0.update(&[0]);
     let prime = Pr::prime(crate::ccykc::LAMBDA, transcript.0.finalize_xof());
-    let modulus = &prime * &UnsignedInteger::from_be_slice(class_group.p());
-    let modulus_bytes = modulus.to_be_bytes();
-    let modulus = crypto_bigint::NonZero::new(modulus.0).unwrap();
+    let c = crate::ccykc::natural_from_bytes(&crate::be_bytes(&c));
+    let prime = crate::ccykc::natural_from_bytes(&prime.to_be_bytes());
+    let modulus = &prime * &crate::ccykc::natural_from_bytes(class_group.p());
 
     let D_Z_tilde_i_0 = class_group.decompress_p(&mut *transcript)?;
     let D_K_tilde_i_0 = class_group.decompress_p(&mut *transcript)?;
@@ -264,49 +268,105 @@ impl<CG: Element, P: Parameters<CG>, Pr: Primes> RoundTwoProofs<CG, P> for Ccykc
     let D_ZU_i = class_group.decompress_p(&mut *transcript)?;
     let D_KU_i = class_group.decompress_p(&mut *transcript)?;
 
-    let e_delta_i = crate::ccykc::read_e_bytes(&mut *transcript, &modulus)?;
-    let e_alpha_i = crate::ccykc::read_e_bytes(&mut *transcript, &modulus)?;
-    let e_beta_i = crate::ccykc::read_e_bytes(&mut *transcript, &modulus)?;
-    let e_u_i = crate::ccykc::read_e_bytes(&mut *transcript, &modulus)?;
+    let e_delta_i = crate::ccykc::read_e(&mut *transcript, &modulus)?;
+    let e_alpha_i = crate::ccykc::read_e(&mut *transcript, &modulus)?;
+    let e_beta_i = crate::ccykc::read_e(&mut *transcript, &modulus)?;
+    let e_u_i = crate::ccykc::read_e(&mut *transcript, &modulus)?;
 
-    if CG::mul_once(class_group.identity_p().clone(), D_Z_tilde_i_0, &modulus_bytes)
-      .add(&CG::mul(G, &e_delta_i)) !=
-      R_Z_tilde_i_0.add(&CG::mul_once(class_group.identity_p().clone(), Z_tilde_i_0, &c))
-    {
-      Err(io::Error::other("Z_tilde_i.0 PoK was invalid"))?;
-    }
+    let table = |scalar_bits: u64, point| {
+      Table::new_for_scalar_bits(
+        scalar_bits.try_into().unwrap(),
+        class_group.identity_p().clone(),
+        point,
+      )
+    };
 
-    if CG::mul_once(class_group.identity_p().clone(), D_K_tilde_i_0, &modulus_bytes)
-      .add(&CG::mul(G, &e_alpha_i)) !=
-      R_K_tilde_i_0.add(&CG::mul_once(class_group.identity_p().clone(), K_tilde_i_0, &c))
-    {
-      Err(io::Error::other("K_tilde_i.0 PoK was invalid"))?;
-    }
+    let D_Z_tilde_i_0 = table(modulus.significant_bits(), D_Z_tilde_i_0);
+    let D_K_tilde_i_0 = table(modulus.significant_bits(), D_K_tilde_i_0);
+    let D_U_i = table(modulus.significant_bits(), D_U_i);
+    let D_ZU_i = table(modulus.significant_bits(), D_ZU_i);
+    let D_KU_i = table(modulus.significant_bits(), D_KU_i);
+    let R_Z_tilde_i_0 = table(128, -R_Z_tilde_i_0);
+    let R_K_tilde_i_0 = table(128, -R_K_tilde_i_0);
+    let R_U_i = table(128, -R_U_i);
+    let R_ZU_i = table(128, -R_ZU_i);
+    let R_KU_i = table(128, -R_KU_i);
+    let Z_tilde_i_0 = table(c.significant_bits(), -Z_tilde_i_0);
+    let K_tilde_i_0 = table(c.significant_bits(), -K_tilde_i_0);
+    let U_i = table(c.significant_bits(), -U_i);
+    let ZU_i = table(c.significant_bits(), -ZU_i);
+    let KU_i = table(c.significant_bits(), -KU_i);
 
-    if CG::mul_once(class_group.identity_p().clone(), D_U_i, &modulus_bytes)
-      .add(&CG::mul(G, &e_beta_i))
-      .add(&CG::mul(Y, &e_u_i)) !=
-      R_U_i.add(&CG::mul_once(class_group.identity_p().clone(), U_i, &c))
-    {
-      Err(io::Error::other("U_i.0 PoK was invalid"))?;
-    }
+    let mut weight = || {
+      let mut weight = [0; 16];
+      rng.fill_bytes(&mut weight);
+      crate::ccykc::natural_from_bytes(&weight)
+    };
+    let weight_Z_tilde = weight();
+    let weight_K_tilde = weight();
+    let weight_U_i = weight();
+    let weight_ZU_i = weight();
+    let weight_KU_i = weight();
 
-    if CG::mul_once(class_group.identity_p().clone(), D_ZU_i, &modulus_bytes)
-      .add(&CG::mul(&Z_tilde.1, &e_u_i))
-      .add(&CG::mul(neg_U, &e_delta_i))
-      .add(&CG::mul(&Z_tilde.0, &e_beta_i)) !=
-      R_ZU_i.add(&CG::mul_once(class_group.identity_p().clone(), ZU_i, &c))
-    {
-      Err(io::Error::other("ZU_i.0 PoK was invalid"))?;
-    }
+    let D_Z_tilde_i_0_scalar = crate::ccykc::natural_to_bytes(&(&weight_Z_tilde * &modulus));
+    let mut G_scalar = &weight_Z_tilde * &e_delta_i;
+    let Z_tilde_i_0_scalar = crate::ccykc::natural_to_bytes(&(&weight_Z_tilde * &c));
+    let R_Z_tilde_i_0_scalar = crate::ccykc::natural_to_bytes(&weight_Z_tilde);
 
-    if CG::mul_once(class_group.identity_p().clone(), D_KU_i, &modulus_bytes)
-      .add(&CG::mul(&K_tilde.1, &e_u_i))
-      .add(&CG::mul(neg_U, &e_alpha_i))
-      .add(&CG::mul(&K_tilde.0, &e_beta_i)) !=
-      R_KU_i.add(&CG::mul_once(class_group.identity_p().clone(), KU_i, &c))
+    let D_K_tilde_i_0_scalar = crate::ccykc::natural_to_bytes(&(&weight_K_tilde * &modulus));
+    G_scalar += &weight_K_tilde * &e_alpha_i;
+    let K_tilde_i_0_scalar = crate::ccykc::natural_to_bytes(&(&weight_K_tilde * &c));
+    let R_K_tilde_i_0_scalar = crate::ccykc::natural_to_bytes(&weight_K_tilde);
+
+    let D_U_i_scalar = crate::ccykc::natural_to_bytes(&(&weight_U_i * &modulus));
+    G_scalar += &weight_U_i * &e_beta_i;
+    let Y_scalar = crate::ccykc::natural_to_bytes(&(&weight_U_i * &e_u_i));
+    let U_i_scalar = crate::ccykc::natural_to_bytes(&(&weight_U_i * &c));
+    let R_U_i_scalar = crate::ccykc::natural_to_bytes(&weight_U_i);
+
+    let D_ZU_i_scalar = crate::ccykc::natural_to_bytes(&(&weight_ZU_i * &modulus));
+    let Z_tilde_1_scalar = crate::ccykc::natural_to_bytes(&(&weight_ZU_i * &e_u_i));
+    let mut neg_U_scalar = &weight_ZU_i * &e_delta_i;
+    let Z_tilde_0_scalar = crate::ccykc::natural_to_bytes(&(&weight_ZU_i * &e_beta_i));
+    let ZU_i_scalar = crate::ccykc::natural_to_bytes(&(&weight_ZU_i * &c));
+    let R_ZU_i_scalar = crate::ccykc::natural_to_bytes(&weight_ZU_i);
+
+    let D_KU_i_scalar = crate::ccykc::natural_to_bytes(&(&weight_KU_i * &modulus));
+    let K_tilde_1_scalar = crate::ccykc::natural_to_bytes(&(&weight_Z_tilde * &e_u_i));
+    neg_U_scalar += &weight_KU_i * &e_alpha_i;
+    let K_tilde_0_scalar = crate::ccykc::natural_to_bytes(&(&weight_KU_i * &e_beta_i));
+    let KU_i_scalar = crate::ccykc::natural_to_bytes(&(&weight_KU_i * &c));
+    let R_KU_i_scalar = crate::ccykc::natural_to_bytes(&weight_KU_i);
+
+    if CG::multiexp(
+      class_group.identity_p(),
+      &[
+        (G, &crate::ccykc::natural_to_bytes(&G_scalar)),
+        (&D_Z_tilde_i_0, &D_Z_tilde_i_0_scalar),
+        (&Z_tilde_i_0, &Z_tilde_i_0_scalar),
+        (&R_Z_tilde_i_0, &R_Z_tilde_i_0_scalar),
+        (&D_K_tilde_i_0, &D_K_tilde_i_0_scalar),
+        (&K_tilde_i_0, &K_tilde_i_0_scalar),
+        (&R_K_tilde_i_0, &R_K_tilde_i_0_scalar),
+        (&D_U_i, &D_U_i_scalar),
+        (Y, &Y_scalar),
+        (&U_i, &U_i_scalar),
+        (&R_U_i, &R_U_i_scalar),
+        (&D_ZU_i, &D_ZU_i_scalar),
+        (&Z_tilde.1, &Z_tilde_1_scalar),
+        (&Z_tilde.0, &Z_tilde_0_scalar),
+        (&ZU_i, &ZU_i_scalar),
+        (&R_ZU_i, &R_ZU_i_scalar),
+        (&D_KU_i, &D_KU_i_scalar),
+        (&K_tilde.1, &K_tilde_1_scalar),
+        (&K_tilde.0, &K_tilde_0_scalar),
+        (&KU_i, &KU_i_scalar),
+        (&R_KU_i, &R_KU_i_scalar),
+        (neg_U, &crate::ccykc::natural_to_bytes(&neg_U_scalar)),
+      ],
+    ) != *class_group.identity_p()
     {
-      Err(io::Error::other("KU_i.0 PoK was invalid"))?;
+      Err(io::Error::other("invalid proof"))?;
     }
 
     Ok(())

@@ -4,10 +4,7 @@ use std::io::{self, Read, Write};
 use zeroize::Zeroizing;
 use rand_core::{RngCore, CryptoRng};
 
-use ::malachite::{
-  base::num::{arithmetic::traits::*, basic::traits::*, conversion::traits::*},
-  *,
-};
+use ::malachite::{base::num::basic::traits::*, *};
 
 use group::{
   ff::{Field, PrimeField},

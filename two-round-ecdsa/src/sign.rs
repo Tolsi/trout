@@ -662,7 +662,7 @@ impl<CG: Element, P: Parameters<CG>> Signing<CG, P> {
     .unwrap();
 
     P::RoundTwoProofs::prove(
-      rng,
+      &mut *rng,
       self.setup.view().class_group(),
       self.setup.view().G(),
       self.setup.view().Y(),
@@ -678,7 +678,7 @@ impl<CG: Element, P: Parameters<CG>> Signing<CG, P> {
     .unwrap();
 
     // Because this is the view if we're participating, accumulate our own signature share
-    match aggregating.aggregate(self.setup.i(), message.1.clone()) {
+    match aggregating.aggregate(rng, self.setup.i(), message.1.clone()) {
       Ready::Ready(_) => unreachable!("t == 1 barred at setup"),
       Ready::NotReady((aggregating_, error)) => {
         aggregating = aggregating_;
@@ -728,6 +728,7 @@ impl<CG: Element, P: Parameters<CG>> Aggregating<CG, P> {
   /// If a signature is returned, no messages were faulty.
   pub fn aggregate(
     mut self,
+    rng: &mut (impl RngCore + CryptoRng),
     participant: Participant,
     message: Vec<u8>,
   ) -> Ready<
@@ -816,6 +817,7 @@ impl<CG: Element, P: Parameters<CG>> Aggregating<CG, P> {
           &crate::be_bytes(&self.observing_signing.lagrange_coefficients[&participant]),
         );
         if P::RoundTwoProofs::verify(
+          rng,
           setup.class_group(),
           setup.G(),
           setup.Y(),

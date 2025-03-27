@@ -50,8 +50,12 @@ fn sign() {
   let (second, second_message) = second.sign(&mut OsRng, MESSAGE);
   println!("Signed!");
 
-  let Ready::Ready(first_signature) = first.aggregate(second_i, second_message) else { panic!() };
-  let Ready::Ready(second_signature) = second.aggregate(first_i, first_message) else { panic!() };
+  let Ready::Ready(first_signature) = first.aggregate(&mut OsRng, second_i, second_message) else {
+    panic!()
+  };
+  let Ready::Ready(second_signature) = second.aggregate(&mut OsRng, first_i, first_message) else {
+    panic!()
+  };
   let first_signature = first_signature.unwrap();
   let second_signature = second_signature.unwrap();
   assert_eq!(first_signature, second_signature);
