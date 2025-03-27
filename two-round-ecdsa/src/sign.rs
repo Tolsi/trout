@@ -552,34 +552,13 @@ impl<CG: Element, P: Parameters<CG>> ObservingSigning<CG, P> {
     // We don't transcript this as it's deterministic to the transcripted setup + signing set
     let C_tilde = C_tilde.unwrap();
 
-    let x_coordinate_bytes = crate::be_bytes(&x_coordinate);
-    // Again, not transcripted as deterministic to the transcript
-    let r_C_tilde = (
-      CG::mul(
-        &Table::new_for_scalar_bits(
-          <P as Parameters<CG>>::F::NUM_BITS.try_into().unwrap(),
-          self.setup.class_group().identity_p().clone(),
-          C_tilde.0,
-        ),
-        &x_coordinate_bytes,
-      ),
-      // This table is only used once and SHOULD use `new_for_scalar_bits`
-      // TODO: Add `message_hash * r**-1` so we can build *and reuse* this table? The ECDSA scalar
-      // inversion is likely cheaper than this ad-hoc table which is the most efficient way to do
-      // any scaling of a class-group element
-      CG::mul(
-        &Table::new_for_scalar_bits(
-          <P as Parameters<CG>>::F::NUM_BITS.try_into().unwrap(),
-          self.setup.class_group().identity_p().clone(),
-          C_tilde.1,
-        ),
-        &x_coordinate_bytes,
-      ),
-    );
+    // Panics with negligible probability
+    let message_derivative = message_hash * x_coordinate.invert().unwrap();
+
     // Again, not transcripted as deterministic (and therefore already bound) to the transcript
     let Z_tilde = (
-      r_C_tilde.0,
-      CG::mul(self.setup.class_group().f(), &crate::be_bytes(&message_hash)).add(&r_C_tilde.1),
+      C_tilde.0,
+      CG::mul(self.setup.class_group().f(), &crate::be_bytes(&message_derivative)).add(&C_tilde.1),
     );
     let Z_tilde = table_scaled_decryption_ciphertext::<CG, P>(self.setup.class_group(), Z_tilde);
 
@@ -634,13 +613,12 @@ impl<CG: Element, P: Parameters<CG>> Signing<CG, P> {
 
     let delta_i = Zeroizing::new(
       self.setup.share_ciphertext_opening() *
-        &(&UnsignedInteger::from_be_slice(&crate::be_bytes(&aggregating.x_coordinate)) *
-          &UnsignedInteger::from_be_slice(&crate::be_bytes(
-            &aggregating.observing_signing.lagrange_coefficients[&self.setup.i()],
-          ))),
+        &UnsignedInteger::from_be_slice(&crate::be_bytes(
+          &aggregating.observing_signing.lagrange_coefficients[&self.setup.i()],
+        )),
     );
 
-    // (H(m) + rx) * u
+    // (H(m)*r**-1 + x) * u
     scaled_decryption::<CG, P>(
       &aggregating.Z_tilde,
       &aggregating.observing_signing.neg_U,
@@ -789,7 +767,9 @@ impl<CG: Element, P: Parameters<CG>> Aggregating<CG, P> {
           be_bytes_to_scalar(log)
         };
 
+        // This is `(H(m)*r**-1 + x) * u`, so we need to scale it by `r` for `(H(m) + rx) * u`
         let numerator = discrete_logarithm(ZU.unwrap());
+        let numerator = numerator * self.x_coordinate;
         let denominator = discrete_logarithm(KU.unwrap());
 
         let r = self.x_coordinate;

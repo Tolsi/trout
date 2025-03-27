@@ -4,7 +4,7 @@ use std::io;
 use zeroize::Zeroizing;
 use rand_core::{RngCore, CryptoRng};
 
-use ::malachite::{base::num::logic::traits::*, *};
+use ::malachite::base::num::logic::traits::*;
 
 use class_groups::{Element, Table, ClassGroup};
 
