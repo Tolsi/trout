@@ -1,6 +1,6 @@
 #[test]
 fn primes() {
-  use two_round_ecdsa::proofs::{Primes, CryptoPrimesStack, CryptoPrimesHeap, GmpPrimes};
+  use two_round_ecdsa::proofs::{Primes, CryptoPrimesStack, CryptoPrimesHeap};
 
   fn test<P: Primes>() {
     let start = std::time::Instant::now();
@@ -18,5 +18,5 @@ fn primes() {
   test::<CryptoPrimesStack<crypto_bigint::U128>>();
   test::<CryptoPrimesHeap>();
   #[cfg(feature = "gmp")]
-  test::<GmpPrimes>();
+  test::<two_round_ecdsa::proofs::GmpPrimes>();
 }

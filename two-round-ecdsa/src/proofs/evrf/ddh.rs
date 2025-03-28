@@ -239,6 +239,7 @@ impl<F: PrimeField> Delta_i<F> {
 
   // ... and allow fetching the exact constraints for specific variables later
   // In practice, this lets us reuse these calculcations between prover and verifier
+  // TODO: Use a two-bit table for this
   fn delta_i(&self, i: usize, k_i: Variable) -> (LinComb<F>, LinComb<F>) {
     let (delta_x, delta_y, x_apostrophe, y_apostrophe) = self.0[i];
     (
