@@ -12,11 +12,6 @@ use group::{
 };
 use ciphersuite::Ciphersuite;
 
-/*
-  Generalized Bulletproofs is an extension of the Bulletproofs R1CS statement to support Vector
-  Commitments. We invoke it without Vector Commitments, in which case it collapses back to the
-  traditional Bulletproofs. This means we do use Bulletproofs here and not a newer proof.
-*/
 use generalized_bulletproofs::*;
 use generalized_bulletproofs_circuit_abstraction::*;
 
@@ -100,149 +95,161 @@ impl<F: PrimeField> CXY<F> {
   }
 }
 
-// Claim 1
-struct DiscreteLogarithm {
-  // The bits themselves
-  bits: Vec<Variable>,
-  // The products of the bits as necessary for 3-bit tables
-  three_bit_table_products: Vec<Variable>,
-  // The products of the bits as necessary for 2-bit tables
-  two_bit_table_products: Option<Variable>,
-}
-impl DiscreteLogarithm {
-  fn commit<C: Ciphersuite, F: PrimeFieldBits>(
-    circuit: &mut Circuit<C>,
-    scalar: Option<&F>,
-  ) -> Self {
-    let mut bit_iter = scalar.map(|scalar| {
-      crate::const_to_le_bits(scalar).map(|choice| {
-        let bit = C::F::from(u64::from(choice.unwrap_u8()));
-        (bit, bit - C::F::ONE)
-      })
-    });
+// Claim 1, which we embed into the setup to avoid the cost per-invocation
+/*
+  The eVRF paper describes commiting to $k$ (sampled from $[0, s - 1]$) over $G_{T,1}$.
+  $G_{T,1}$ is of order $q$, enabling an adversary to sample from $[0, s - 1 - q]$ and open as
+  $k$ or $k + q$, or to sample from $[q, s - 1]$ and open as $k$ or $k - q$. This assumes
+  $q < s$. We can add the bound $q < s$, yet for the popular secp256k1 curve, it inherently
+  forms a cycle with secq256k1. The order of secq256k1 is greater than the order of secp256k1
+  and would be disqualified by this bound, forcing finding (and justifying) an alternative
+  curve.
 
-    let mut bits = Vec::with_capacity(F::NUM_BITS.try_into().unwrap());
-    for _ in 0 .. F::NUM_BITS {
-      let (a, b, c) = circuit.mul(None, None, bit_iter.as_mut().map(|iter| iter.next().unwrap()));
-      // a - 1 == b
-      circuit.equality(LinComb::from(a).constant(-C::F::ONE), &b.into());
-      // c == 0
-      circuit.constrain_equal_to_zero(c.into());
-      // Push the constrained bit to the result
-      bits.push(a);
+  Distinctly, the eVRF paper describes a single Pedersen Commitment over multiple generators
+  ($G_{T,n}$). This would be a Pedersen Vector Commitment which Bulletproofs, as published, does
+  _not_ support. It's Generalized Bulletproofs which extends Bulletproofs' R1CS statement regarding
+  vector commitments.
+
+  Due to the problems with the described scheme, and to avoid the cost of the bits per invocation,
+  we instead define the commitment to $k$ to be a vector commitment to its bits. We then modify
+  $\pi_Q$ to prove it's well-formed accordingly. This does not extend the definition of
+  Bulletproofs present in the eVRF paper (as it defines Generalized Bulletproofs) and enables
+  reducing the IPA rows (for a 256-bit curve) to the next power of two.
+*/
+struct DiscreteLogarithm<G: EmbeddedCurve>(PhantomData<G>);
+impl<G: EmbeddedCurve> DiscreteLogarithm<G> {
+  fn bit(i: usize) -> Variable {
+    debug_assert!(i < usize::try_from(G::Scalar::NUM_BITS).unwrap());
+    Variable::CG { commitment: 0, index: i }
+  }
+  fn three_bit_table_products(i: usize) -> (Variable, Variable, Variable, Variable) {
+    debug_assert!(i < usize::try_from(G::Scalar::NUM_BITS / 3).unwrap());
+    (
+      Variable::CG {
+        commitment: 0,
+        index: usize::try_from(G::Scalar::NUM_BITS).unwrap() + (4 * i),
+      },
+      Variable::CG {
+        commitment: 0,
+        index: usize::try_from(G::Scalar::NUM_BITS).unwrap() + (4 * i) + 1,
+      },
+      Variable::CG {
+        commitment: 0,
+        index: usize::try_from(G::Scalar::NUM_BITS).unwrap() + (4 * i) + 2,
+      },
+      Variable::CG {
+        commitment: 0,
+        index: usize::try_from(G::Scalar::NUM_BITS).unwrap() + (4 * i) + 3,
+      },
+    )
+  }
+  fn two_bit_table_product(i: usize) -> Variable {
+    debug_assert!(i < usize::from(u8::from((G::Scalar::NUM_BITS % 3) == 2)));
+    Variable::CG {
+      commitment: 0,
+      index: usize::try_from(G::Scalar::NUM_BITS).unwrap() +
+        (4 * usize::try_from(G::Scalar::NUM_BITS / 3).unwrap()) +
+        i,
     }
+  }
+  fn Y_g_bold_i() -> usize {
+    usize::try_from(
+      G::Scalar::NUM_BITS +
+        (4 * (G::Scalar::NUM_BITS / 3)) +
+        u32::from(u8::from((G::Scalar::NUM_BITS % 3) == 2)),
+    )
+    .unwrap()
+  }
+  fn commit<C: Ciphersuite<F = G::FieldElement>>(
+    rng: &mut (impl RngCore + CryptoRng),
+    scalar: &G::Scalar,
+  ) -> Zeroizing<PedersenVectorCommitment<C>> {
+    /*
+      TODO: The following is the relevant part of this circuit for this claim. We don't currently
+      implement this, as this PoC exists to evaluate the signing protocol and simply defers to a
+      trusted setup for the key generation protocol. For the key generation protocol to be
+      implemented, this commitment would need to be paired with a proof it's well-formed of the
+      following structure.
 
-    let mut product = |a: &Variable, b: &Variable| {
-      let a = LinComb::empty().term(C::F::ONE, *a);
-      let b = LinComb::empty().term(C::F::ONE, *b);
-      let witness = circuit.eval(&a).map(|a| {
-        let b = circuit.eval(&b).unwrap();
-        (a, b)
-      });
-      let (_b_1, _b_2, product) = circuit.mul(Some(a), Some(b), witness);
-      product
-    };
-
-    let mut three_bit_table_products = Vec::with_capacity(bits.len() / 3);
-    {
-      let mut iter = bits.iter();
-      while let Some(_b_0) = iter.next() {
-        let Some(b_1) = iter.next() else { continue };
-        let Some(b_2) = iter.next() else { continue };
-        three_bit_table_products.push(product(b_1, b_2));
-      }
-    }
-
-    let mut two_bit_table_products = None;
-    {
-      let mut iter = bits.iter().skip(3 * three_bit_table_products.len());
-      while let Some(b_0) = iter.next() {
-        debug_assert!(two_bit_table_products.is_none());
-        let Some(b_1) = iter.next() else { continue };
-        two_bit_table_products = Some(product(b_0, b_1));
-      }
-    }
+      An additional claim would also be needed the discrete logarithm is not congruent to zero
+      modulo the order of the embedded elliptic curve (`s`). This would be checking that if `s_i` is
+      `0`, `(less == 1) || (k_i == 0)`. If `s_i` is `1`, then `less = less || (k_i == 0)`, where `i`
+      is iterated from `0` to `l`.
+    */
 
     /*
-      The eVRF paper describes commiting to $k$ (sampled from $[0, s - 1]$) over $G_{T,1}$.
-      $G_{T,1}$ is of order $q$, enabling an adversary to sample from $[0, s - 1 - q]$ and open as
-      $k$ or $k + q$, or to sample from $[q, s - 1]$ and open as $k$ or $k - q$. This assumes
-      $q < s$. We can add the bound $q < s$, yet for the popular secp256k1 curve, it inherently
-      forms a cycle with secq256k1. The order of secq256k1 is greater than the order of secp256k1
-      and would be disqualified by this bound, forcing finding (and justifying) an alternative
-      curve.
-
-      We instead don't require $k$ be committed over $G_{T,1}$. We require a commitment to $k_{hi}$
-      and a distinct commitment to $k_{lo}$, where $k_{lo} = \sum^{l/2}_{i=0} 2**i * k_i$ and
-      $k_{hi} = \sum^{l}_{i=(l/2)+1} 2**i * k_i$. This is safe so long as
-      $((ceil_log_2(s) + 1) / 2) <= floor_log_2(q)$, which is a bound only unsatisfied by the
-      insane.
-
-      Distinctly, the eVRF paper describes a single Pedersen Commitment over multiple generators
-      ($G_{T,n}$). This would be a vector commitment which Bulletproofs, as published, does _not_
-      support. It's Generalized Bulletproofs which extends Bulletproofs' R1CS statement regarding
-      vector commitments.
-
-      Instead of using Generalized Bulletproofs extension of the Bulletproofs' R1CS statement, we
-      simply use multiple Pedersen Commitments. This transforms the singular Pedersen Vector
-      Commitment $T = Q + Y$ to the three Pedersen Commitments $Q_{lo}, Q_{hi}, Y$. Since
-      $Q_{lo}, Q_{hi}$ is from the setup, this does not increase the proof size directly.
-
-      We do need a slightly modified opening of $Y$ however. $Y$ is written as the output of the
-      eVRF scaling a binding generator, yet here, it's a full Pedersen Commitment. We accordingly
-      need to prove the opening of the Pedersen Commitment $Y = y * G + r * H$, which requires
-      revealing $Y' = y * G$ and performing a proof of knowledge for the resulting $Y - Y'$. This
-      only adds transmission of a single element, $Y'$, as the proof of knowledge for $Y - Y'$
-      over $H$ is of equivalent complexity to the originally required proof of knowledge for $Y$
-      over $G_{T,2}$. This has the note it's incomplete as we don't prove $Y'$ solely has a
-      discrete logarithm over $G$, either proving a weaker statement or requiring an additional
-      proof of knowledge.
-
-      If we were to use Pedersen Vector Commitments, we could use a single Pedersen Vector
-      Commitment for the entire bitstring of the scalar. To do so with Pedersen Commitments
-      wouldn't increase the bandwidth of each invocation, yet would increase the verification time
-      (due to all of those individual Pedersen Commitments needing to be scaled within the
-      multi-scalar multiplication). Using a Pedersen Vector Commitment does not increase the
-      verification time compared to sending the two Pedersen Commitments $Q, Y$ and out-performs
-      the current solution of $Q_{lo}, Q_{hi}, Y$ regarding points novel to the multi-scalar
-      multiplication. It also removes the bit constraints per invocation, potentially shrinking the
-      constant reference string.
-
-      Finally, it is possible to perform a setup which cannot ever be invoked due to the lack of
-      range proofs on $Q_{lo}, Q_{hi}$. This is inherent to the originally proposed eVRF as well
-      when $ceil_log_2(q) > ceil_log_2(s)$.
-    */
-    {
-      assert!(F::NUM_BITS.div_ceil(2) <= C::F::CAPACITY);
-      {
-        let mut two_i = C::F::ONE;
-        let mut lo = LinComb::empty();
-        for i in 0 ..= (F::CAPACITY / 2) {
-          lo = lo.term(two_i, bits[usize::try_from(i).unwrap()]);
-          two_i = two_i.double();
-        }
-        circuit.equality(lo, &LinComb::from(Variable::V(0)));
+      let mut bits = Vec::with_capacity(F::NUM_BITS.try_into().unwrap());
+      for _ in 0 .. F::NUM_BITS {
+        let (a, b, c) = circuit.mul(None, None, bit_iter.as_mut().map(|iter| iter.next().unwrap()));
+        // a - 1 == b
+        circuit.equality(LinComb::from(a).constant(-C::F::ONE), &b.into());
+        // c == 0
+        circuit.constrain_equal_to_zero(c.into());
+        // Push the constrained bit to the result
+        bits.push(a);
       }
+
+      let mut product = |a: &Variable, b: &Variable| {
+        let a = LinComb::empty().term(C::F::ONE, *a);
+        let b = LinComb::empty().term(C::F::ONE, *b);
+        let witness = circuit.eval(&a).map(|a| {
+          let b = circuit.eval(&b).unwrap();
+          (a, b)
+        });
+        let (_b_1, _b_2, product) = circuit.mul(Some(a), Some(b), witness);
+        product
+      };
+
+      let mut three_bit_table_products = Vec::with_capacity(bits.len() / 3);
       {
-        let mut two_i = C::F::ONE;
-        let mut hi = LinComb::empty();
-        for i in ((F::CAPACITY / 2) + 1) ..= F::CAPACITY {
-          hi = hi.term(two_i, bits[usize::try_from(i).unwrap()]);
-          two_i = two_i.double();
+        let mut iter = bits.iter();
+        while let Some(_b_0) = iter.next() {
+          let Some(b_1) = iter.next() else { continue };
+          let Some(b_2) = iter.next() else { continue };
+          three_bit_table_products.push(product(b_1, b_2));
         }
-        circuit.equality(hi, &LinComb::from(Variable::V(1)));
+      }
+
+      let mut two_bit_table_products = None;
+      {
+        let mut iter = bits.iter().skip(3 * three_bit_table_products.len());
+        while let Some(b_0) = iter.next() {
+          debug_assert!(two_bit_table_products.is_none());
+          let Some(b_1) = iter.next() else { continue };
+          two_bit_table_products = Some(product(b_0, b_1));
+        }
+      }
+    */
+
+    let mut values = Vec::with_capacity(usize::try_from(1 + (2 * G::Scalar::NUM_BITS)).unwrap());
+    for bit in crate::const_to_le_bits(scalar) {
+      values.push(C::F::conditional_select(&C::F::ZERO, &C::F::ONE, bit));
+    }
+    let mut bits = crate::const_to_le_bits(scalar);
+    while let Some(b_0) = bits.next() {
+      let Some(b_1) = bits.next() else { continue };
+      if let Some(b_2) = bits.next() {
+        // The 3-bit table bit preprocesses
+        values.push(C::F::conditional_select(&C::F::ZERO, &C::F::ONE, b_0 & b_1));
+        values.push(C::F::conditional_select(&C::F::ZERO, &C::F::ONE, b_0 & b_2));
+        values.push(C::F::conditional_select(&C::F::ZERO, &C::F::ONE, b_1 & b_2));
+        values.push(C::F::conditional_select(&C::F::ZERO, &C::F::ONE, b_0 & b_1 & b_2));
+      } else {
+        // The 2-bit table bit preprocess
+        values.push(C::F::conditional_select(&C::F::ZERO, &C::F::ONE, b_0 & b_1));
       }
     }
-
-    Self { bits, three_bit_table_products, two_bit_table_products }
+    // The value which will be used by the nonce
+    values.push(C::F::ZERO);
+    Zeroizing::new(PedersenVectorCommitment { g_values: values.into(), mask: C::F::random(rng) })
   }
 }
 
 // Equation 13
 #[allow(non_camel_case_types)]
-struct Delta_i<F: PrimeField>(Vec<(F, F)>);
-impl<F: PrimeField> Delta_i<F> {
-  fn new<G: EmbeddedCurve<FieldElement = F>>(C: &[G], C_xy: &CXY<F>, X: &[G]) -> Self {
+struct Delta_i<G: EmbeddedCurve>(Vec<(G::FieldElement, G::FieldElement)>);
+impl<G: EmbeddedCurve> Delta_i<G> {
+  fn new(C: &[G], C_xy: &CXY<G::FieldElement>, X: &[G]) -> Self {
     // For each 3-bit window, we preprocess indexes (000, 001, 010, 011, 100, 101, 110, 111)
     // For any 2-bit window after, we preprocess indexes (00, 01, 10, 11)
     // For any 1-bit window after, we preprocess indexes (0, 1)
@@ -279,7 +286,7 @@ impl<F: PrimeField> Delta_i<F> {
     Self(res)
   }
 
-  fn last_bit(&self, k_last: Variable) -> (LinComb<F>, LinComb<F>) {
+  fn last_bit(&self, k_last: Variable) -> (LinComb<G::FieldElement>, LinComb<G::FieldElement>) {
     let if_zero = self.0.len() - 2;
     let if_one = if_zero + 1;
     let (x_if_0, y_if_0) = self.0[if_zero];
@@ -290,14 +297,11 @@ impl<F: PrimeField> Delta_i<F> {
     (x, y)
   }
 
-  fn last_two_bits(&self, discrete_logarithm: &DiscreteLogarithm) -> (LinComb<F>, LinComb<F>) {
-    let three_bit_windows = discrete_logarithm.three_bit_table_products.len();
-
-    let two_bit_window_bits_index = 3 * discrete_logarithm.three_bit_table_products.len();
-    debug_assert_eq!(two_bit_window_bits_index, discrete_logarithm.bits.len() - 2);
-    let b_0 = discrete_logarithm.bits[two_bit_window_bits_index];
-    let b_1 = discrete_logarithm.bits[two_bit_window_bits_index + 1];
-    let b_01 = discrete_logarithm.two_bit_table_products.unwrap();
+  fn last_two_bits(&self) -> (LinComb<G::FieldElement>, LinComb<G::FieldElement>) {
+    let two_bit_window_bits_index = usize::try_from(G::Scalar::NUM_BITS - 2).unwrap();
+    let b_0 = DiscreteLogarithm::<G>::bit(two_bit_window_bits_index);
+    let b_1 = DiscreteLogarithm::<G>::bit(two_bit_window_bits_index + 1);
+    let b_01 = DiscreteLogarithm::<G>::two_bit_table_product(0);
 
     // If (b_0, b_1) == (0, 0), this yields w
     // If (b_0, b_1) == (1, 0), this yields w + x - w = x
@@ -307,6 +311,7 @@ impl<F: PrimeField> Delta_i<F> {
       LinComb::empty().constant(w).term(x - w, b_0).term(y - w, b_1).term(z - x - y + w, b_01)
     };
 
+    let three_bit_windows = usize::try_from(G::Scalar::NUM_BITS / 3).unwrap();
     let index_within_vec = 2usize.pow(3) * three_bit_windows;
     let (x_00, y_00) = self.0[index_within_vec];
     let (x_01, y_01) = self.0[index_within_vec + 1];
@@ -317,43 +322,45 @@ impl<F: PrimeField> Delta_i<F> {
     (x, y)
   }
 
-  fn three_bit_table<C: Ciphersuite<F = F>>(
+  fn three_bit_table(
     &self,
-    circuit: &mut Circuit<C>,
     three_bit_window_i: usize,
-    discrete_logarithm: &DiscreteLogarithm,
-  ) -> (LinComb<F>, LinComb<F>) {
-    let b_0 = discrete_logarithm.bits[3 * three_bit_window_i];
-    let b_1 = discrete_logarithm.bits[(3 * three_bit_window_i) + 1];
-    let b_2 = discrete_logarithm.bits[(3 * three_bit_window_i) + 2];
-    let b_ampersand = discrete_logarithm.three_bit_table_products[three_bit_window_i];
+  ) -> (LinComb<G::FieldElement>, LinComb<G::FieldElement>) {
+    let b_0 = DiscreteLogarithm::<G>::bit(3 * three_bit_window_i);
+    let b_1 = DiscreteLogarithm::<G>::bit((3 * three_bit_window_i) + 1);
+    let b_2 = DiscreteLogarithm::<G>::bit((3 * three_bit_window_i) + 2);
+    let (b_01, b_02, b_12, b_012) =
+      DiscreteLogarithm::<G>::three_bit_table_products(three_bit_window_i);
 
     /*
-      This cursed table is specified (with a few typos) in IACR ePrint 2022/756.
+      If (b_0, b_1, b_2) == (0, 0, 0), this yields w
+      If (b_0, b_1, b_2) == (1, 0, 0), this yields w + x - w = x
+      If (b_0, b_1, b_2) == (0, 1, 0), this yields w + y - w = y
+      If (b_0, b_1, b_2) == (1, 1, 0), this yields w + x - w + y - w + z - x - y + w = z
+      If (b_0, b_1, b_2) == (0, 0, 1), this yields w + l - w = l
+      If (b_0, b_1, b_2) == (1, 0, 1), this yields w + x - w + l - w + m - x - l + w = m
+      If (b_0, b_1, b_2) == (0, 1, 1), this yields w + y - w + l - w + n - y - l + w = n
+      If (b_0, b_1, b_2) == (1, 1, 1), this yields
+        w + x - w + y - w + z - x - y + w + l - w + m - x - l + w + n - y - l + w
+        + o - z + x -m + l - w - n + y = o
+      This same table can be achieved with `b_0, b_1, b_2, b_12`, and a per-table derivative,
+      but this is paid for in the setup and offers the cheapest invocation.
 
-      It has the distinct property (compared to the prior tables) of having a multiplication
-      dependent on the table, meaning it can't be preprocessed. This isn't an issue for us as
-      removing these bits would not reduce us to a smaller power of two once padded.
+      TODO: At this point, where we have 3 bits and 4 products, we can just publish eight elements
+      where the `i`th element is 1 if the number is `i` and the rest are 0. We have the space in
+      the vector commitment.
     */
-    let mut select = |T_0: F, T_1: F, T_2: F, T_3: F, T_4: F, T_5: F, T_6: F, T_7: F| {
-      let a = LinComb::empty().term(F::ONE, b_0);
-      let b = LinComb::empty()
-        .term(-T_0 + T_1 + T_2 - T_3 + T_4 - T_5 - T_6 + T_7, b_ampersand)
-        .term(T_0 - T_1 - T_2 + T_3, b_1)
-        .term(T_0 - T_1 - T_4 + T_5, b_2)
-        .constant(-T_0 + T_1);
-      let witness = circuit.eval(&a).map(|a| {
-        let b = circuit.eval(&b).unwrap();
-        (a, b)
-      });
-      let (_a, _b, c) = circuit.mul(Some(a), Some(b), witness);
-      ((LinComb::empty()
-        .term(-T_0 + T_2 + T_4 - T_6, b_ampersand)
-        .term(T_0 - T_2, b_1)
-        .term(T_0 - T_4, b_2)
-        .constant(-T_0)) *
-        (-F::ONE))
-        .term(F::ONE, c)
+    type F<G> = <G as EmbeddedCurve>::FieldElement;
+    let select = |w: F<G>, x: F<G>, y: F<G>, z: F<G>, l: F<G>, m: F<G>, n: F<G>, o: F<G>| {
+      LinComb::empty()
+        .constant(w)
+        .term(x - w, b_0)
+        .term(y - w, b_1)
+        .term(z - x - y + w, b_01)
+        .term(l - w, b_2)
+        .term(m - x - l + w, b_02)
+        .term(n - y - l + w, b_12)
+        .term(o - z + x - m + l - w - n + y, b_012)
     };
 
     let index_within_vec = 2usize.pow(3) * three_bit_window_i;
@@ -419,9 +426,8 @@ impl P {
     circuit: &mut Circuit<C>,
     C: &[G],
     X: &[G],
-    delta_i: &Delta_i<G::FieldElement>,
+    delta_i: &Delta_i<G>,
     k: Option<&G::Scalar>,
-    discrete_logarithm: &DiscreteLogarithm,
   ) -> Variable {
     let windows = (G::Scalar::NUM_BITS / 3) + u32::from(u8::from((G::Scalar::NUM_BITS % 3) != 0));
 
@@ -454,7 +460,7 @@ impl P {
       const {
         assert!(G::Scalar::NUM_BITS >= 3);
       }
-      let (delta_0_x, delta_0_y) = delta_i.three_bit_table(circuit, 0, discrete_logarithm);
+      let (delta_0_x, delta_0_y) = delta_i.three_bit_table(0);
       let witness = circuit.eval(&delta_0_x).map(|a| {
         let b = circuit.eval(&delta_0_y).unwrap();
         (a, b)
@@ -473,9 +479,9 @@ impl P {
       let (delta_i_x, delta_i_y) =
         match usize::try_from(G::Scalar::NUM_BITS).unwrap().checked_sub(bit_i) {
           Some(0) | None => unreachable!(),
-          Some(1) => delta_i.last_bit(discrete_logarithm.bits[bit_i]),
-          Some(2) => delta_i.last_two_bits(discrete_logarithm),
-          Some(_) => delta_i.three_bit_table(circuit, window_i, discrete_logarithm),
+          Some(1) => delta_i.last_bit(DiscreteLogarithm::<G>::bit(bit_i)),
+          Some(2) => delta_i.last_two_bits(),
+          Some(_) => delta_i.three_bit_table(window_i),
         };
 
       // Equation 14
@@ -519,31 +525,34 @@ impl P {
   This means we only duplicate the allocation/formatting of the constraints themselves.
 */
 #[derive(Clone)]
-struct CommonCircuit<C: Ciphersuite>(Circuit<C>, Variable, Variable);
-impl<C: Ciphersuite> CommonCircuit<C> {
-  fn new<G: EmbeddedCurve<FieldElement = C::F>>(
+struct CommonCircuit<C: Ciphersuite, G: EmbeddedCurve<FieldElement = C::F>>(
+  Circuit<C>,
+  Variable,
+  Variable,
+  PhantomData<G>,
+);
+impl<C: Ciphersuite, G: EmbeddedCurve<FieldElement = C::F>> CommonCircuit<C, G> {
+  fn new(
     C: &[G],
     X_0: &[G],
-    X_0_delta_i: &Delta_i<C::F>,
+    X_0_delta_i: &Delta_i<G>,
     X_1: &[G],
-    X_1_delta_i: &Delta_i<C::F>,
+    X_1_delta_i: &Delta_i<G>,
     mut circuit: Circuit<C>,
     k: Option<&G::Scalar>,
   ) -> Self {
-    let discrete_logarithm = DiscreteLogarithm::commit(&mut circuit, k);
+    let dh_x_0_x = P::evaluate(&mut circuit, C, X_0, X_0_delta_i, k);
+    let dh_x_1_x = P::evaluate(&mut circuit, C, X_1, X_1_delta_i, k);
 
-    let dh_x_0_x = P::evaluate(&mut circuit, C, X_0, X_0_delta_i, k, &discrete_logarithm);
-    let dh_x_1_x = P::evaluate(&mut circuit, C, X_1, X_1_delta_i, k, &discrete_logarithm);
-
-    Self(circuit, dh_x_0_x, dh_x_1_x)
+    Self(circuit, dh_x_0_x, dh_x_1_x, PhantomData)
   }
 
   // Bind this common circuit to a specific instance
   fn bind(self, k_apostrophe: C::F) -> Circuit<C> {
-    let Self(mut circuit, dh_x_0_x, dh_x_1_x) = self;
+    let Self(mut circuit, dh_x_0_x, dh_x_1_x, PhantomData) = self;
     circuit.equality(
       LinComb::from(dh_x_1_x).term(k_apostrophe, dh_x_0_x),
-      &LinComb::from(Variable::V(2)),
+      &LinComb::from(Variable::CG { commitment: 0, index: DiscreteLogarithm::<G>::Y_g_bold_i() }),
     );
     circuit
   }
@@ -570,28 +579,20 @@ pub struct DdhEvrfGlobalSetup<C: Ciphersuite, G: EmbeddedCurve<FieldElement = C:
 */
 #[derive(Clone)]
 pub struct DdhEvrfSetupView<C: Ciphersuite> {
-  Q_lo: C::G,
-  Q_hi: C::G,
+  Q: C::G,
   k_apostrophe: C::F,
-  Q_serialization: Vec<u8>,
 }
 impl<C: Ciphersuite> DdhEvrfSetupView<C> {
-  fn new(Q_lo: C::G, Q_hi: C::G) -> Self {
+  fn new(Q: C::G) -> Self {
     let k_apostrophe = C::reduce_512({
       let mut hasher = blake3::Hasher::new();
-      hasher.update(Q_lo.to_bytes().as_ref());
-      hasher.update(Q_hi.to_bytes().as_ref());
+      hasher.update(Q.to_bytes().as_ref());
       let mut bytes = [0; 64];
       hasher.finalize_xof().fill(&mut bytes);
       bytes
     });
 
-    let mut Q_serialization =
-      Vec::with_capacity(2 * <C::G as GroupEncoding>::Repr::default().as_ref().len());
-    Q_serialization.extend(Q_lo.to_bytes().as_ref());
-    Q_serialization.extend(Q_hi.to_bytes().as_ref());
-
-    DdhEvrfSetupView { Q_lo, Q_hi, k_apostrophe, Q_serialization }
+    DdhEvrfSetupView { Q, k_apostrophe }
   }
 }
 
@@ -599,20 +600,18 @@ impl<C: Ciphersuite> DdhEvrfSetupView<C> {
 #[derive(Clone)]
 pub struct DdhEvrfSetup<C: Ciphersuite, G: EmbeddedCurve<FieldElement = C::F>> {
   k: Zeroizing<G::Scalar>,
-  Q_lo: Zeroizing<PedersenCommitment<C>>,
-  Q_lo_commitment: C::G,
-  Q_hi: Zeroizing<PedersenCommitment<C>>,
-  Q_hi_commitment: C::G,
+  Q: Zeroizing<PedersenVectorCommitment<C>>,
+  Q_commitment: C::G,
   k_apostrophe: C::F,
 }
 
 /// The context for the DDH eVRF.
 pub struct DdhEvrfContext<C: Ciphersuite, G: EmbeddedCurve<FieldElement = C::F>> {
   X_0: Vec<G>,
-  X_0_delta_i: Delta_i<G::FieldElement>,
+  X_0_delta_i: Delta_i<G>,
   X_1: Vec<G>,
-  X_1_delta_i: Delta_i<G::FieldElement>,
-  verifier_circuit: CommonCircuit<C>,
+  X_1_delta_i: Delta_i<G>,
+  verifier_circuit: CommonCircuit<C, G>,
 }
 
 fn random_point<G: GroupEncoding>(xof: &mut blake3::OutputReader) -> G {
@@ -641,21 +640,26 @@ impl<
   type BatchVerifier = BatchVerifier<C>;
 
   fn global_setup() -> Self::GlobalSetup {
+    let Y_g_bold_i = DiscreteLogarithm::<G>::Y_g_bold_i();
     let generators = {
       let mut xof = {
         let mut hasher = blake3::Hasher::new();
         hasher.update(b"DDH eVRF Generators");
         hasher.finalize_xof()
       };
+      let g = random_point::<C::G>(&mut xof);
       let h = random_point::<C::G>(&mut xof);
-      let generators = usize::try_from((16 * G::Scalar::NUM_BITS).next_power_of_two()).unwrap();
+      // TODO: Properly calculate this instead of this estimation which does work
+      let generators = usize::try_from((4 * G::Scalar::NUM_BITS).next_power_of_two()).unwrap();
       let mut g_bold = Vec::with_capacity(generators);
       let mut h_bold = Vec::with_capacity(generators);
       for _ in 0 .. generators {
         g_bold.push(random_point::<C::G>(&mut xof));
         h_bold.push(random_point::<C::G>(&mut xof));
       }
-      Generators::new(C::G::generator(), h, g_bold, h_bold).unwrap()
+      // Set the Pedersen Vector Commitment we use for the nonce to the generator used for ECDSA
+      g_bold[Y_g_bold_i] = C::G::generator();
+      Generators::new(g, h, g_bold, h_bold).unwrap()
     };
     let C = C::<G>();
     let C_xy = CXY::new::<G>(&C);
@@ -676,54 +680,12 @@ impl<
       break candidate;
     };
 
-    let mut bit_iter = crate::const_to_le_bits(k.deref());
-
-    let mut lo = Zeroizing::new(C::F::ZERO);
-    let mut bit_pos = C::F::ONE;
-    for _ in 0 ..= (G::Scalar::CAPACITY / 2) {
-      let bit = bit_iter.next().unwrap();
-      *lo += C::F::conditional_select(&C::F::ZERO, &bit_pos, bit);
-      bit_pos = bit_pos.double();
-    }
-
-    let mut hi = Zeroizing::new(C::F::ZERO);
-    let mut bit_pos = C::F::ONE;
-    for bit in bit_iter {
-      *hi += C::F::conditional_select(&C::F::ZERO, &bit_pos, bit);
-      bit_pos = bit_pos.double();
-    }
-
-    /*
-      TODO: This probably needs a range proof that `k` is in the range `[1, s - 1]`. Else, the
-      prover can commit to `0` or `s` and trigger `P_l == identity`, breaking the incomplete
-      addition rules performed.
-
-      Specifically, we'd have a proof that the bit decomposition of these Pedersen commitments is
-      known, of the expected length, has a non-zero sum, and is less than `s`. The last check would
-      be checking that if `s_i` is `0`, `(less == 1) || (k_i == 0)`. If `s_i` is `1`, then
-      `less = less || (k_i == 0)`, where `i` is iterated from `0` to `l`.
-
-      We don't include this range proof currently as the protocol, as implemented in this proof of
-      concept, is only provided with a dealer key-generation (a trusted setup). Such a proof,
-      necessary for a distributed setup, would not affect the performance of the signing protocol
-      this implementation exists to benchmark.
-    */
-    let Q_lo =
-      Zeroizing::new(PedersenCommitment::<C> { value: *lo, mask: C::F::random(&mut *rng) });
-    let Q_hi =
-      Zeroizing::new(PedersenCommitment::<C> { value: *hi, mask: C::F::random(&mut *rng) });
+    let Q = DiscreteLogarithm::<G>::commit(rng, &k);
     let setup_view = DdhEvrfSetupView::new(
-      Q_lo.commit(global_setup.generators.g(), global_setup.generators.h()),
-      Q_hi.commit(global_setup.generators.g(), global_setup.generators.h()),
+      Q.commit(global_setup.generators.g_bold_slice(), global_setup.generators.h()).unwrap(),
     );
-    let setup = DdhEvrfSetup {
-      k,
-      Q_lo,
-      Q_lo_commitment: setup_view.Q_lo,
-      Q_hi,
-      Q_hi_commitment: setup_view.Q_hi,
-      k_apostrophe: setup_view.k_apostrophe,
-    };
+    let setup =
+      DdhEvrfSetup { k, Q, Q_commitment: setup_view.Q, k_apostrophe: setup_view.k_apostrophe };
     (setup_view, setup)
   }
 
@@ -771,10 +733,19 @@ impl<
     let ecdh_1 = Zeroizing::new(Zeroizing::new(context.X_1[0] * setup.k.deref()).to_xy().unwrap());
     let nonce = Zeroizing::new((ecdh_0.deref().0 * setup.k_apostrophe) + ecdh_1.deref().0);
 
-    let nonce_mask = Zeroizing::new(C::F::random(&mut *rng));
-    let Y = PedersenCommitment::<C> { value: *nonce, mask: *nonce_mask };
+    let Y = P::E::generator() * nonce.deref();
+    transcript.write_all(Y.to_bytes().as_ref())?;
 
-    let Y_commitment = Y.commit(global_setup.generators.g(), global_setup.generators.h());
+    // Prove the opening of Y
+    {
+      let r_nonce = Zeroizing::new(C::F::random(&mut *rng));
+      transcript.write_all((P::E::generator() * r_nonce.deref()).to_bytes().as_ref())?;
+      let c = P::from_xof(transcript.0.finalize_xof());
+      transcript.write_all(((c * nonce.deref()) + r_nonce.deref()).to_repr().as_ref())?;
+    }
+
+    let mut T = setup.Q.deref().clone();
+    T.g_values[DiscreteLogarithm::<G>::Y_g_bold_i()] = *nonce;
 
     let circuit = CommonCircuit::new(
       &global_setup.C,
@@ -782,17 +753,14 @@ impl<
       &context.X_0_delta_i,
       &context.X_1,
       &context.X_1_delta_i,
-      Circuit::prove(vec![], vec![*setup.Q_lo, *setup.Q_hi, Y]),
+      Circuit::prove(vec![T], vec![]),
       Some(&setup.k),
     )
     .bind(setup.k_apostrophe);
     let muls = circuit.muls();
 
     let mut bp_transcript = transcript::Transcript::new(transcript.0.finalize().into());
-    let commitments = bp_transcript.write_commitments::<C>(
-      vec![],
-      vec![setup.Q_lo_commitment, setup.Q_hi_commitment, Y_commitment],
-    );
+    let commitments = bp_transcript.write_commitments::<C>(vec![setup.Q_commitment + Y], vec![]);
 
     let (statement, witness) = circuit
       .statement(global_setup.generators.reduce(muls.next_power_of_two()).unwrap(), commitments)
@@ -800,25 +768,8 @@ impl<
     let witness = witness.unwrap();
     statement.prove(&mut *rng, &mut bp_transcript, witness).unwrap();
     let bp = bp_transcript.complete();
-    // Write everything after $Q_{hi}, Q_{lo}$
-    transcript.write_all(&bp[(2 * <C::G as GroupEncoding>::Repr::default().as_ref().len()) ..])?;
-
-    // Open the Pedersen commitment
-    transcript.write_all((global_setup.generators.g() * nonce.deref()).to_bytes().as_ref())?;
-
-    // Prove the opening of the Pedersen commitment
-    // We do prove the opening of `Y'` and `r * H` to ensure this proves the proper statement, even
-    // though the round-one proofs should prove themselves for knowledge of `Y'`
-    {
-      let r_nonce = Zeroizing::new(C::F::random(&mut *rng));
-      let r_nonce_mask = Zeroizing::new(C::F::random(rng));
-      transcript.write_all((global_setup.generators.g() * r_nonce.deref()).to_bytes().as_ref())?;
-      transcript
-        .write_all((global_setup.generators.h() * r_nonce_mask.deref()).to_bytes().as_ref())?;
-      let c = P::from_xof(transcript.0.finalize_xof());
-      transcript.write_all(((c * nonce.deref()) + r_nonce.deref()).to_repr().as_ref())?;
-      transcript.write_all(((c * nonce_mask.deref()) + r_nonce_mask.deref()).to_repr().as_ref())?;
-    }
+    // Write everything after $T$
+    transcript.write_all(&bp[<C::G as GroupEncoding>::Repr::default().as_ref().len() ..])?;
 
     Ok(nonce)
   }
@@ -846,6 +797,14 @@ impl<
       additional: global_batch_verifier.additional.clone(),
     };
 
+    // The commitment for the nonce
+    let Y = P::read_canonical_E(&mut *transcript)?;
+
+    // Read the PoK for the nonce
+    let R_nonce = P::read_canonical_E(&mut *transcript)?;
+    let Y_c = P::from_xof(transcript.0.finalize_xof());
+    let s_nonce = C::read_F(&mut *transcript)?;
+
     let circuit = context.verifier_circuit.clone().bind(setup.k_apostrophe);
     let muls = circuit.muls();
 
@@ -857,25 +816,23 @@ impl<
 
       debug_assert_eq!(2u8.next_power_of_two(), 2);
       debug_assert_eq!(2u8.ilog2(), 1);
-      // ((Q_hi, Q_lo), Y, (A_I, A_O, S), (T_0, T_1, T_3, T_4, T_5, T_6), (L_i, R_i))
+      // (T, (A_I, A_O, S), (T_0, T_1, T_3, T_4, T_5, T_6), (L_i, R_i))
       /*
         Please note we read $T_0$ from the transcript, when Bulletproofs doesn't, as Bulletproofs
-        assumes it's zero yet Generalized Bulletproofs doesn't (though it will be in our
-        invocation, as it's only non-zero when there's vector commitments).
-
-        TODO: PR generalized-bulletproofs for this oddity
+        assumes it's zero yet Generalized Bulletproofs doesn't (as it's non-zero when using
+        Pedersen Vector Commitments).
       */
-      let points = 2 + 1 + 3 + 6 + (2 * usize::try_from(muls.next_power_of_two().ilog2()).unwrap());
+      let points = 1 + 3 + 6 + (2 * usize::try_from(muls.next_power_of_two().ilog2()).unwrap());
       // (tau_x, u, \hat{t}, a, b)
       let scalars = 5;
       (points * point_len) + (scalars * scalar_len)
     };
     let mut bp = vec![0; bp_len];
-    bp[.. (2 * point_len)].copy_from_slice(&setup.Q_serialization);
-    transcript.read_exact(&mut bp[(2 * point_len) ..])?;
+    bp[.. point_len].copy_from_slice((setup.Q + Y).to_bytes().as_ref());
+    transcript.read_exact(&mut bp[point_len ..])?;
 
     let mut bp_transcript = transcript::VerifierTranscript::new(bp_context, &bp);
-    let commitments = bp_transcript.read_commitments(0, 3)?;
+    let commitments = bp_transcript.read_commitments(1, 0)?;
     circuit
       .statement(global_setup.generators.reduce(muls).unwrap(), commitments)
       .unwrap()
@@ -883,41 +840,22 @@ impl<
       .verify(&mut *rng, &mut batch_verifier, &mut bp_transcript)
       .map_err(|e| io::Error::other(format!("{e:?}")))?;
 
-    // The Pedersen commitment for the nonce
-    let Y_commitment = P::read_canonical_E(&mut &bp[(2 * point_len) ..])?;
-    // The nonce itself
-    let Y_apostrophe = P::read_canonical_E(&mut *transcript)?;
-
+    // Verify the PoK for the nonce
     {
-      let R_nonce = P::read_canonical_E(&mut *transcript)?;
-      let R_nonce_mask = P::read_canonical_E(&mut *transcript)?;
-      let c = P::from_xof(transcript.0.finalize_xof());
-
-      {
-        let s_nonce = C::read_F(&mut *transcript)?;
-        let weight = C::F::random(&mut *rng);
-        // R
-        batch_verifier.additional.push((weight, R_nonce));
-        // + cX
-        batch_verifier.additional.push((weight * c, Y_apostrophe));
-        // - sG == 0
-        batch_verifier.g -= weight * s_nonce;
-      }
-
-      {
-        let s_nonce_mask = C::read_F(&mut *transcript)?;
-        let weight = C::F::random(&mut *rng);
-        batch_verifier.additional.push((weight, R_nonce_mask));
-        batch_verifier.additional.push((weight * c, (Y_commitment - Y_apostrophe)));
-        batch_verifier.h -= weight * s_nonce_mask;
-      }
+      let weight = C::F::random(&mut *rng);
+      // R
+      batch_verifier.additional.push((weight, R_nonce));
+      // + cX
+      batch_verifier.additional.push((weight * Y_c, Y));
+      // - sG == 0
+      batch_verifier.g_bold[DiscreteLogarithm::<G>::Y_g_bold_i()] -= weight * s_nonce;
     }
 
     // Since we didn't error (corrupting the batch verifier), write this back to the global batch
     // verifier
     *global_batch_verifier = batch_verifier;
 
-    Ok(Y_apostrophe)
+    Ok(Y)
   }
   fn verify(
     global_setup: &Self::GlobalSetup,
