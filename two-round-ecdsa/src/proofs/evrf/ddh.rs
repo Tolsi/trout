@@ -733,13 +733,23 @@ impl<
   fn queue_verification<R: io::Read>(
     rng: &mut (impl RngCore + CryptoRng),
     global_setup: &Self::GlobalSetup,
-    batch_verifier: &mut Self::BatchVerifier,
+    global_batch_verifier: &mut Self::BatchVerifier,
     // TODO: Use this to implement identifiable aborts
     _participant: dkg::Participant,
     setup: &Self::SetupView,
     context: &Self::Context,
     transcript: &mut DigestReader<R>,
   ) -> io::Result<P::E> {
+    // The GBP lib will corrupt its batch verifier on error, so we clone it here
+    let mut batch_verifier = BatchVerifier {
+      g: global_batch_verifier.g,
+      h: global_batch_verifier.h,
+      g_bold: global_batch_verifier.g_bold.clone(),
+      h_bold: global_batch_verifier.h_bold.clone(),
+      h_sum: global_batch_verifier.h_sum.clone(),
+      additional: global_batch_verifier.additional.clone(),
+    };
+
     let circuit = context.verifier_circuit.clone().bind(setup.k_apostrophe);
     let muls = circuit.muls();
 
@@ -774,7 +784,7 @@ impl<
       .statement(global_setup.generators.reduce(muls).unwrap(), commitments)
       .unwrap()
       .0
-      .verify(&mut *rng, batch_verifier, &mut bp_transcript)
+      .verify(&mut *rng, &mut batch_verifier, &mut bp_transcript)
       .map_err(|e| io::Error::other(format!("{e:?}")))?;
 
     // The Pedersen commitment for the nonce
@@ -806,6 +816,10 @@ impl<
         batch_verifier.h -= weight * s_nonce_mask;
       }
     }
+
+    // Since we didn't error (corrupting the batch verifier), write this back to the global batch
+    // verifier
+    *global_batch_verifier = batch_verifier;
 
     Ok(Y_apostrophe)
   }

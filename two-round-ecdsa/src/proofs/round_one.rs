@@ -245,6 +245,8 @@ impl<CG: Element, P: Parameters<CG>, Pr: Primes> RoundOneProofs<CG, P> for Ccykc
     let e_beta_i = crate::ccykc::read_e(&mut *transcript, &modulus)?;
     let e_u_i = crate::ccykc::read_e(&mut *transcript, &modulus)?;
 
+    // We now start mutating the batch verifier, so it's important we don't error from here on
+
     // ZKPoKLog accumulation
     {
       {
