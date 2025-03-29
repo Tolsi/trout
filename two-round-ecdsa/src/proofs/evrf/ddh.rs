@@ -100,7 +100,12 @@ impl<F: PrimeField> CXY<F> {
 }
 
 // Claim 1
-struct DiscreteLogarithm(Vec<Variable>);
+struct DiscreteLogarithm {
+  // The bits themselves
+  bits: Vec<Variable>,
+  // The products of the bits as necessary for 2-bit tables
+  two_bit_table_products: Vec<Variable>,
+}
 impl DiscreteLogarithm {
   fn commit<C: Ciphersuite, F: PrimeFieldBits>(
     circuit: &mut Circuit<C>,
@@ -113,7 +118,7 @@ impl DiscreteLogarithm {
       })
     });
 
-    let mut res = Vec::with_capacity(F::NUM_BITS.try_into().unwrap());
+    let mut bits = Vec::with_capacity(F::NUM_BITS.try_into().unwrap());
     for _ in 0 .. F::NUM_BITS {
       let (a, b, c) = circuit.mul(None, None, bit_iter.as_mut().map(|iter| iter.next().unwrap()));
       // a - 1 == b
@@ -121,7 +126,24 @@ impl DiscreteLogarithm {
       // c == 0
       circuit.constrain_equal_to_zero(c.into());
       // Push the constrained bit to the result
-      res.push(a);
+      bits.push(a);
+    }
+
+    let mut two_bit_table_products = Vec::with_capacity(bits.len() / 2);
+    {
+      let mut iter = bits.iter();
+      while let Some(bit) = iter.next() {
+        let Some(bit_after) = iter.next() else { continue };
+
+        let a = LinComb::empty().term(C::F::ONE, *bit);
+        let b = LinComb::empty().term(C::F::ONE, *bit_after);
+        let witness = circuit.eval(&a).map(|a| {
+          let b = circuit.eval(&b).unwrap();
+          (a, b)
+        });
+        let (_bit, _bit_after, product) = circuit.mul(Some(a), Some(b), witness);
+        two_bit_table_products.push(product);
+      }
     }
 
     /*
@@ -179,7 +201,7 @@ impl DiscreteLogarithm {
         let mut two_i = C::F::ONE;
         let mut lo = LinComb::empty();
         for i in 0 ..= (F::CAPACITY / 2) {
-          lo = lo.term(two_i, res[usize::try_from(i).unwrap()]);
+          lo = lo.term(two_i, bits[usize::try_from(i).unwrap()]);
           two_i = two_i.double();
         }
         circuit.equality(lo, &LinComb::from(Variable::V(0)));
@@ -188,14 +210,14 @@ impl DiscreteLogarithm {
         let mut two_i = C::F::ONE;
         let mut hi = LinComb::empty();
         for i in ((F::CAPACITY / 2) + 1) ..= F::CAPACITY {
-          hi = hi.term(two_i, res[usize::try_from(i).unwrap()]);
+          hi = hi.term(two_i, bits[usize::try_from(i).unwrap()]);
           two_i = two_i.double();
         }
         circuit.equality(hi, &LinComb::from(Variable::V(1)));
       }
     }
 
-    Self(res)
+    Self { bits, two_bit_table_products }
   }
 }
 
@@ -230,7 +252,7 @@ impl<F: PrimeField> Delta_i<F> {
     Self(res)
   }
 
-  fn one_bit_table(&self, k_last: Variable) -> (LinComb<F>, LinComb<F>) {
+  fn last_bit(&self, k_last: Variable) -> (LinComb<F>, LinComb<F>) {
     let if_zero = self.0.len() - 2;
     let if_one = if_zero + 1;
     let (x_if_0, y_if_0) = self.0[if_zero];
@@ -241,24 +263,14 @@ impl<F: PrimeField> Delta_i<F> {
     (x, y)
   }
 
-  fn two_bit_table<C: Ciphersuite>(
+  fn two_bit_table(
     &self,
-    circuit: &mut Circuit<C>,
     two_bit_window_i: usize,
-    k_i: Variable,
-    k_i_plus_one: Variable,
+    discrete_logarithm: &DiscreteLogarithm,
   ) -> (LinComb<F>, LinComb<F>) {
-    let b_0 = k_i;
-    let b_1 = k_i_plus_one;
-    let b_01 = {
-      let witness = circuit.eval(&LinComb::from(b_0)).map(|a| {
-        let b = circuit.eval(&LinComb::from(b_1)).unwrap();
-        (a, b)
-      });
-      let (_, _, b_01) =
-        circuit.mul(Some(LinComb::from(k_i)), Some(LinComb::from(k_i_plus_one)), witness);
-      b_01
-    };
+    let b_0 = discrete_logarithm.bits[2 * two_bit_window_i];
+    let b_1 = discrete_logarithm.bits[(2 * two_bit_window_i) + 1];
+    let b_01 = discrete_logarithm.two_bit_table_products[two_bit_window_i];
 
     // If (b_0, b_1) == (0, 0), this yields w
     // If (b_0, b_1) == (1, 0), this yields w + x - w = x
@@ -353,9 +365,10 @@ impl P {
 
     // "verify that P_0 is constructed correctly, and this is done using (13)"
     let P_0 = {
-      debug_assert!(discrete_logarithm.0.len() >= 2);
-      let (delta_0_x, delta_0_y) =
-        delta_i.two_bit_table(circuit, 0, discrete_logarithm.0[0], discrete_logarithm.0[1]);
+      const {
+        assert!(G::Scalar::NUM_BITS >= 2);
+      }
+      let (delta_0_x, delta_0_y) = delta_i.two_bit_table(0, discrete_logarithm);
       let witness = circuit.eval(&delta_0_x).map(|a| {
         let b = circuit.eval(&delta_0_y).unwrap();
         (a, b)
@@ -371,15 +384,10 @@ impl P {
       let P_i = res[window_i - 1];
 
       let bit_i = 2 * window_i;
-      let (delta_i_x, delta_i_y) = if bit_i == (discrete_logarithm.0.len() - 1) {
-        delta_i.one_bit_table(discrete_logarithm.0[bit_i])
+      let (delta_i_x, delta_i_y) = if bit_i == usize::try_from(G::Scalar::CAPACITY).unwrap() {
+        delta_i.last_bit(discrete_logarithm.bits[bit_i])
       } else {
-        delta_i.two_bit_table(
-          circuit,
-          window_i,
-          discrete_logarithm.0[bit_i],
-          discrete_logarithm.0[bit_i + 1],
-        )
+        delta_i.two_bit_table(window_i, discrete_logarithm)
       };
 
       // Equation 14
