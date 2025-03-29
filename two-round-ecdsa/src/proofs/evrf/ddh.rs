@@ -53,26 +53,13 @@ impl EmbeddedCurve for secq256k1::Point {
 }
 
 // Equation 9, yet scaling G_s as we have no futher use for the discrete logarithms over G_s
+// We also don't populate for `0 ..= l` yet `0 ..= (l / 2)` due to the usage of two-bit windows
 fn C<G: EmbeddedCurve>() -> Vec<G> {
-  const {
-    // ceil log2
-    let mut log2_l = G::Scalar::CAPACITY.ilog2();
-    if (1 << log2_l) < G::Scalar::CAPACITY {
-      log2_l += 1;
-    }
-
-    // s > l**2
-    // Technically, this is 2**n > log2((2**log2_ceil(l))**2) where 2**n < s
-    // The real check only trips for some trivial moduli so this more aggressive version isn't an
-    // issue
-    assert!(G::Scalar::CAPACITY > (log2_l + log2_l));
-  }
-
   let mut carry = 0;
-  let res = (0 ..= G::Scalar::CAPACITY)
+  let res = (0 ..= (G::Scalar::CAPACITY / 2))
     .map(|i| {
       G::generator() *
-        (if i != G::Scalar::CAPACITY {
+        (if i != (G::Scalar::CAPACITY / 2) {
           let i = u64::from(i) + 2;
           carry += i;
           G::Scalar::from(i)
@@ -82,6 +69,7 @@ fn C<G: EmbeddedCurve>() -> Vec<G> {
     })
     .collect::<Vec<_>>();
 
+  // We use debug assertions to assert the validity of this as it's only invalid for trivial moduli
   debug_assert!({
     // Sum of all prior elements
     let mut carry = G::identity();
@@ -213,39 +201,81 @@ impl DiscreteLogarithm {
 
 // Equation 13
 #[allow(non_camel_case_types)]
-struct Delta_i<F: PrimeField>(Vec<(F, F, F, F)>);
+struct Delta_i<F: PrimeField>(Vec<(F, F)>);
 impl<F: PrimeField> Delta_i<F> {
-  // We preprocess this for a point...
   fn new<G: EmbeddedCurve<FieldElement = F>>(C: &[G], C_xy: &CXY<F>, X: &[G]) -> Self {
-    Self(
-      (0 ..= usize::try_from(G::Scalar::CAPACITY).unwrap())
-        .map(|i| {
-          let (x, y) = {
-            let delta = X[i] + C[i];
-            delta.to_xy().unwrap()
-          };
-          let (x_apostrophe, y_apostrophe) = {
-            #[allow(clippy::let_and_return)]
-            let delta_apostrophe = C_xy.0[i];
-            delta_apostrophe
-          };
-          let delta_x = x - x_apostrophe;
-          let delta_y = y - y_apostrophe;
-          (delta_x, delta_y, x_apostrophe, y_apostrophe)
-        })
-        .collect(),
-    )
+    // For each 2-bit window, we preprocess indexes (00, 01, 10, 11)
+    // We also process the indexes (0, 1) for any remainder bit outside of the 2-bit windows
+    let two_bit_windows = usize::try_from(G::Scalar::NUM_BITS / 2).unwrap();
+    let one_bit_windows = usize::try_from(G::Scalar::NUM_BITS % 2).unwrap();
+    let points = (2usize.pow(2) * two_bit_windows) + (2usize.pow(1) * one_bit_windows);
+    let mut res = Vec::with_capacity(points);
+
+    for i in 0 .. two_bit_windows {
+      let mut last = C[i];
+      res.push(C_xy.0[i]);
+      for _ in 1 .. 2usize.pow(2) {
+        let this = last + X[2 * i];
+        res.push(this.to_xy().unwrap());
+        last = this;
+      }
+    }
+    if one_bit_windows != 0 {
+      res.push(C_xy.0[two_bit_windows]);
+      res.push((C[two_bit_windows] + X[two_bit_windows]).to_xy().unwrap());
+    }
+    debug_assert_eq!(C_xy.0.len(), two_bit_windows + one_bit_windows);
+    debug_assert_eq!(C.len(), two_bit_windows + one_bit_windows);
+    debug_assert_eq!(res.len(), points);
+    Self(res)
   }
 
-  // ... and allow fetching the exact constraints for specific variables later
-  // In practice, this lets us reuse these calculcations between prover and verifier
-  // TODO: Use a two-bit table for this
-  fn delta_i(&self, i: usize, k_i: Variable) -> (LinComb<F>, LinComb<F>) {
-    let (delta_x, delta_y, x_apostrophe, y_apostrophe) = self.0[i];
-    (
-      LinComb::empty().term(delta_x, k_i).constant(x_apostrophe),
-      LinComb::empty().term(delta_y, k_i).constant(y_apostrophe),
-    )
+  fn one_bit_table(&self, k_last: Variable) -> (LinComb<F>, LinComb<F>) {
+    let if_zero = self.0.len() - 2;
+    let if_one = if_zero + 1;
+    let (x_if_0, y_if_0) = self.0[if_zero];
+    let (x_if_1, y_if_1) = self.0[if_one];
+
+    let x = LinComb::empty().constant(x_if_0).term(x_if_1 - x_if_0, k_last);
+    let y = LinComb::empty().constant(y_if_0).term(y_if_1 - y_if_0, k_last);
+    (x, y)
+  }
+
+  fn two_bit_table<C: Ciphersuite>(
+    &self,
+    circuit: &mut Circuit<C>,
+    two_bit_window_i: usize,
+    k_i: Variable,
+    k_i_plus_one: Variable,
+  ) -> (LinComb<F>, LinComb<F>) {
+    let b_0 = k_i;
+    let b_1 = k_i_plus_one;
+    let b_01 = {
+      let witness = circuit.eval(&LinComb::from(b_0)).map(|a| {
+        let b = circuit.eval(&LinComb::from(b_1)).unwrap();
+        (a, b)
+      });
+      let (_, _, b_01) =
+        circuit.mul(Some(LinComb::from(k_i)), Some(LinComb::from(k_i_plus_one)), witness);
+      b_01
+    };
+
+    // If (b_0, b_1) == (0, 0), this yields w
+    // If (b_0, b_1) == (1, 0), this yields w + x - w = x
+    // If (b_0, b_1) == (0, 1), this yields w + y - w = y
+    // If (b_0, b_1) == (1, 1), this yields w + x - w + y - w + z - x - y + w = z
+    let select = |w, x, y, z| {
+      LinComb::empty().constant(w).term(x - w, b_0).term(y - w, b_1).term(z - x - y + w, b_01)
+    };
+
+    let index_within_vec = 2usize.pow(2) * two_bit_window_i;
+    let (x_00, y_00) = self.0[index_within_vec];
+    let (x_01, y_01) = self.0[index_within_vec + 1];
+    let (x_10, y_10) = self.0[index_within_vec + 2];
+    let (x_11, y_11) = self.0[index_within_vec + 3];
+    let x = select(x_00, x_01, x_10, x_11);
+    let y = select(y_00, y_01, y_10, y_11);
+    (x, y)
   }
 }
 
@@ -265,18 +295,24 @@ impl<'a, G: EmbeddedCurve> P_iIterator<'a, G> {
 impl<G: EmbeddedCurve> Iterator for P_iIterator<'_, G> {
   type Item = Zeroizing<G>;
   fn next(&mut self) -> Option<Self::Item> {
-    let (i, bit) = self.iter.next().unwrap();
-    if i == 0 {
-      let P_0 = Zeroizing::new(G::conditional_select(&self.C[i], &(self.X[i] + self.C[i]), bit));
-      self.last = P_0.clone();
-      Some(P_0)
-    } else {
-      let delta_i =
-        Zeroizing::new(G::conditional_select(&self.C[i], &(self.X[i] + self.C[i]), bit));
-      let P_i = Zeroizing::new(*self.last + delta_i.deref());
-      self.last = P_i.clone();
-      Some(P_i)
+    let (i, bit) = self.iter.next()?;
+    let bit_after = self.iter.next();
+
+    let mut delta_i =
+      Zeroizing::new(self.C[i / 2] + G::conditional_select(&G::identity(), &self.X[i], bit));
+    if let Some((i_plus_one, bit_after)) = bit_after {
+      *delta_i += G::conditional_select(&G::identity(), &self.X[i_plus_one], bit_after);
     }
+    #[allow(clippy::let_and_return)]
+    let res = if i == 0 {
+      let P_0 = delta_i;
+      P_0
+    } else {
+      let P_i = Zeroizing::new(*self.last + *delta_i);
+      P_i
+    };
+    *self.last = *res;
+    Some(res)
   }
 }
 
@@ -295,8 +331,8 @@ impl P {
     let res = {
       let mut P_i =
         k.map(|k| P_iIterator::new(C, X, k).skip(1).map(|point| point.to_xy().unwrap()));
-      let mut res = Vec::with_capacity(G::Scalar::CAPACITY.try_into().unwrap());
-      for _ in 1 ..= G::Scalar::CAPACITY {
+      let mut res = Vec::with_capacity((G::Scalar::CAPACITY / 2).try_into().unwrap());
+      for _ in 1 ..= (G::Scalar::CAPACITY / 2) {
         let P_i = P_i.as_mut().map(|iter| iter.next().unwrap());
         // Calculate x**2
         let (x, other_x, x2) = circuit.mul(None, None, P_i.map(|(x, _y)| (x, x)));
@@ -311,12 +347,15 @@ impl P {
         circuit.equality(y2.into(), &LinComb::from(x3).term(G::a(), x).constant(G::b()));
         res.push((x, y));
       }
+      debug_assert!(P_i.as_mut().map(|iter| iter.next().is_none()).unwrap_or(true));
       res
     };
 
     // "verify that P_0 is constructed correctly, and this is done using (13)"
     let P_0 = {
-      let (delta_0_x, delta_0_y) = delta_i.delta_i(0, discrete_logarithm.0[0]);
+      debug_assert!(discrete_logarithm.0.len() >= 2);
+      let (delta_0_x, delta_0_y) =
+        delta_i.two_bit_table(circuit, 0, discrete_logarithm.0[0], discrete_logarithm.0[1]);
       let witness = circuit.eval(&delta_0_x).map(|a| {
         let b = circuit.eval(&delta_0_y).unwrap();
         (a, b)
@@ -327,11 +366,21 @@ impl P {
     };
 
     // "Second, for i = 1,...,l, verify that the points ... are co-linear"
-    for i in 1 ..= usize::try_from(G::Scalar::CAPACITY).unwrap() {
-      let P_i_minus_1 = if i == 1 { P_0 } else { res[i - 2] };
-      let P_i = res[i - 1];
+    for window_i in 1 ..= usize::try_from(G::Scalar::CAPACITY / 2).unwrap() {
+      let P_i_minus_1 = if window_i == 1 { P_0 } else { res[window_i - 2] };
+      let P_i = res[window_i - 1];
 
-      let (delta_i_x, delta_i_y) = delta_i.delta_i(i, discrete_logarithm.0[i]);
+      let bit_i = 2 * window_i;
+      let (delta_i_x, delta_i_y) = if bit_i == (discrete_logarithm.0.len() - 1) {
+        delta_i.one_bit_table(discrete_logarithm.0[bit_i])
+      } else {
+        delta_i.two_bit_table(
+          circuit,
+          window_i,
+          discrete_logarithm.0[bit_i],
+          discrete_logarithm.0[bit_i + 1],
+        )
+      };
 
       // Equation 14
       let lhs = {
@@ -358,7 +407,7 @@ impl P {
     }
 
     // Return the x coordinate of the final point
-    res[usize::try_from(G::Scalar::CAPACITY).unwrap() - 1].0
+    res.last().unwrap().0
   }
 }
 
