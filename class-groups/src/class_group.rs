@@ -161,7 +161,8 @@ impl<E: Element> ClassGroup<E> {
       p,
       identity_p: identity_p.clone(),
       // Make a very large table for this as it's static to the setup
-      f_table: Table::new(10, identity_p, f),
+      // This should be ~24 MB
+      f_table: Table::new(12, identity_p, f),
       delta_p,
       tess_root_p,
     })

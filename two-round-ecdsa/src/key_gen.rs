@@ -75,7 +75,7 @@ fn class_group<CG: Element, P: Parameters<CG>>(
     ),
     &p_bytes,
   );
-  let G = Table::new(10, class_group.identity_p().clone(), G);
+  let G = Table::new(12, class_group.identity_p().clone(), G);
 
   let Y = class_group.generator_p(&mut class_group_rng);
   let Y = CG::mul(
@@ -86,7 +86,7 @@ fn class_group<CG: Element, P: Parameters<CG>>(
     ),
     &p_bytes,
   );
-  let Y = Table::new(10, class_group.identity_p().clone(), Y);
+  let Y = Table::new(12, class_group.identity_p().clone(), Y);
   (class_group, G, Y)
 }
 
@@ -159,8 +159,8 @@ impl<CG: Element, P: Parameters<CG>> SetupView<CG, P> {
         (
           participant,
           (
-            Table::new(10, class_group.identity_p().clone(), C_0),
-            Table::new(10, class_group.identity_p().clone(), C_1),
+            Table::new(12, class_group.identity_p().clone(), C_0),
+            Table::new(12, class_group.identity_p().clone(), C_1),
           ),
         )
       })
