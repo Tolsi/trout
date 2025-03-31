@@ -261,7 +261,7 @@ impl crate::Element for CryptoBigintElement {
     let (congruence_12, mod_12) = crt(&congruence_1, &mod_1, &congruence_2, &mod_2);
     let (x, _mod_123) = crt(&congruence_12, &mod_12, &congruence_3, &mod_3);
 
-    let B = x;
+    let B = &x % &two_A;
 
     debug_assert!(bool::from(congruence_1.ct_eq(&(&B % &mod_1))));
     debug_assert!(bool::from(congruence_2.ct_eq(&(&B % &mod_2))));

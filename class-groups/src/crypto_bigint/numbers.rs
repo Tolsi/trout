@@ -360,9 +360,22 @@ impl Zeroize for Integer {
 
 impl UnsignedInteger {
   pub(crate) fn gcd(&self, other: &Self) -> UnsignedInteger {
+    let self_precision = self.0.bits_precision();
+    let other_precision = other.0.bits_precision();
+    let self_is_zero = self.is_zero();
+    // Choose the precision of the non-zero element
+    let precision = u32::ct_select(&self_precision, &other_precision, self_is_zero);
+    // Choose the smallest precision of both elements if both are non-zero
+    let precision = u32::ct_select(
+      &precision,
+      &self_precision.min(other_precision),
+      (!self_is_zero) & (!other.is_zero()),
+    );
+
     let (a, b) = widen(&self.0, &other.0);
     // Calculate the gcd via the method provided by crypto-bigint
-    UnsignedInteger(a.as_ref().gcd(b.as_ref()))
+    let gcd = a.as_ref().gcd(b.as_ref());
+    UnsignedInteger(gcd.shorten(precision))
   }
 
   pub(crate) fn extended_gcd_part(&self, other: &Self) -> (UnsignedInteger, UnsignedInteger) {
