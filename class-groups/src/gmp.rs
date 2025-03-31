@@ -239,11 +239,12 @@ impl crate::Element for GmpElement {
     self.add(&-other)
   }
 
-  fn from_be_abc_tess_root_unchecked(
+  fn from_be_abc_discriminant_tess_root_unchecked(
     a: &[u8],
     b_positive: subtle::Choice,
     b: &[u8],
     c: &[u8],
+    _abs_value_of_neg_discriminant: &[u8],
     tess_root: &[u8],
   ) -> Self {
     let to_gmp = |value: &[u8]| {

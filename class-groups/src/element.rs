@@ -115,17 +115,19 @@ pub trait Element:
     Self::mul(&Table::new_for_scalar_bits(scalar.len() * 8, identity, element), scalar)
   }
 
-  /// Parse an element from the big-endian encoding of its coordinates and the floored tesseract
-  /// (fourth) root of the absolute value of the discriminant divided by four.
+  /// Parse an element from the big-endian encoding of its coordinates, the absolute value of the
+  /// negative discriminant, and the floored tesseract (fourth) root of the absolute value of the
+  /// discriminant divided by four.
   ///
   /// This does not check for consistency between the discriminant of the coordinates and the
   /// provided root, nor that the coordinates were reduced. It MUST only be called with validated
   /// arguments.
-  fn from_be_abc_tess_root_unchecked(
+  fn from_be_abc_discriminant_tess_root_unchecked(
     a: &[u8],
     b_positive: subtle::Choice,
     b: &[u8],
     c: &[u8],
+    abs_value_of_neg_discriminant: &[u8],
     tess_root: &[u8],
   ) -> Self;
 

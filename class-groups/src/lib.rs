@@ -11,6 +11,9 @@ pub use element::*;
 mod malachite;
 pub use malachite::MalachiteElement;
 
+mod crypto_bigint;
+pub use crypto_bigint::CryptoBigintElement;
+
 #[cfg(feature = "gmp")]
 mod gmp;
 #[cfg(feature = "gmp")]

@@ -52,11 +52,12 @@ fn element<E: Element>(
   if (b.unsigned_abs_ref() == &a) || (a == c) {
     debug_assert!(b_positive);
   }
-  Some(E::from_be_abc_tess_root_unchecked(
+  Some(E::from_be_abc_discriminant_tess_root_unchecked(
     &a_bytes,
     u8::from(b_positive).into(),
     &b_bytes,
     &natural_to_bytes(&c),
+    &natural_to_bytes(discriminant.unsigned_abs_ref()),
     tess_root_p,
   ))
 }
@@ -519,6 +520,11 @@ fn malachite_class_group() {
 #[test]
 fn gmp_class_group() {
   test_class_group::<crate::GmpElement>(&mut rand_core::OsRng);
+}
+
+#[test]
+fn crypto_bigint_class_group() {
+  test_class_group::<crate::CryptoBigintElement>(&mut rand_core::OsRng);
 }
 
 #[test]
