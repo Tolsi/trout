@@ -8,7 +8,7 @@ use ::malachite::{
   *,
 };
 
-use crypto_bigint::U8192;
+use ::crypto_bigint::BoxedUint;
 use crypto_primes::generate_prime_with_rng;
 
 use crate::{
@@ -17,7 +17,7 @@ use crate::{
 };
 
 // https://eprint.iacr.org/2015/047 B.2 provides this formula
-fn c(a: Natural, b: Natural, discriminant: &Integer) -> Option<Natural> {
+fn c(a: &Natural, b: &Natural, discriminant: &Integer) -> Option<Natural> {
   // b**2 - 4ac = discriminant
   /*
     Since a and b are positive for reduced elements, and our discriminants are negative, c must
@@ -25,12 +25,12 @@ fn c(a: Natural, b: Natural, discriminant: &Integer) -> Option<Natural> {
   */
   debug_assert_eq!(discriminant.sign(), Ordering::Less);
   // We solve for c by rewriting as b**2 - discriminant = 4ac, then dividing by 4a.
-  let four_ac: Integer = Integer::from(b).pow(2u64) - discriminant;
+  let four_ac: Integer = Integer::from(b.pow(2u64)) - discriminant;
   if (&four_ac & Integer::from(3u8)) != Natural::ZERO {
     None?
   }
   let ac = four_ac >> 2u8;
-  let (res, rem) = ac.div_rem(Integer::from(a));
+  let (res, rem) = ac.div_rem(Integer::from(a.clone()));
   if rem != Natural::ZERO {
     None?
   }
@@ -43,10 +43,15 @@ fn element<E: Element>(
   discriminant: &Integer,
   tess_root_p: &[u8],
 ) -> Option<E> {
+  debug_assert!(b.unsigned_abs_ref() <= &a);
   let a_bytes = natural_to_bytes(&a);
   let b_positive = b.sign() != Ordering::Less;
   let b_bytes = natural_to_bytes(b.unsigned_abs_ref());
-  let c = c(a, b.unsigned_abs(), discriminant)?;
+  let c = c(&a, b.unsigned_abs_ref(), discriminant)?;
+  debug_assert!(a <= c);
+  if (b.unsigned_abs_ref() == &a) || (a == c) {
+    debug_assert!(b_positive);
+  }
   Some(E::from_be_abc_tess_root_unchecked(
     &a_bytes,
     u8::from(b_positive).into(),
@@ -98,18 +103,9 @@ impl<E: Element> ClassGroup<E> {
     // Step 2
     let q = {
       let q_bits = (2 * lambda) - mu;
-      // Implementation detail, where we only support finding primes up to this size
-      /*
-        Supporting finding larger primes would slow down searching for all primes, when even
-        https://eprint.iacr.org only suggests a 6784-bit discriminant for 'just' 128-bit security
-        in a 1/2**128-chance event.
-      */
-      if q_bits > 8192 {
-        None?;
-      }
       let q_bits = u32::try_from(q_bits).unwrap();
       loop {
-        let q = generate_prime_with_rng::<U8192>(&mut *rng, q_bits);
+        let q = generate_prime_with_rng::<BoxedUint>(&mut *rng, q_bits);
         let q = natural_from_bytes(q.to_be_bytes().as_ref());
         debug_assert_eq!(u64::from(q_bits), q.significant_bits());
         // p * q is congruent to -1 mod 4
@@ -197,7 +193,7 @@ impl<E: Element> ClassGroup<E> {
     let r = loop {
       // crypto-primes won't generate a prime up to this large yet solely a prime exactly this
       // large, limiting the distribution of primes and adding at least one bit of bias
-      let r = generate_prime_with_rng::<U8192>(
+      let r = generate_prime_with_rng::<BoxedUint>(
         &mut *rng,
         u32::try_from(prime_limit.significant_bits()).unwrap(),
       );
