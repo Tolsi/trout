@@ -8,6 +8,8 @@ use zeroize::Zeroize;
 
 use crypto_bigint::{ConstantTimeSelect, BoxedUint};
 
+use crate::Table;
+
 mod numbers;
 use numbers::*;
 
@@ -39,6 +41,18 @@ impl Zeroize for CryptoBigintElement {
     self.a = UnsignedInteger::from(BoxedUint::one_with_precision(self.max_bits_for_a()));
     self.b =
       Integer::from(UnsignedInteger::from(BoxedUint::one_with_precision(self.max_bits_for_b())));
+  }
+}
+
+impl crypto_bigint::ConstantTimeSelect for CryptoBigintElement {
+  fn ct_select(a: &Self, b: &Self, choice: subtle::Choice) -> Self {
+    Self {
+      a: UnsignedInteger::ct_select(&a.a, &b.a, choice),
+      b: Integer::ct_select(&a.b, &b.b, choice),
+      // Safe since `Element` is documented to have undefined behavior when mixed across class
+      // groups
+      discriminant: a.discriminant.clone(),
+    }
   }
 }
 
@@ -177,12 +191,10 @@ impl CryptoBigintElement {
 }
 
 impl crate::Element for CryptoBigintElement {
+  const MAX_TABLE_BITS: u32 = 8;
+
   fn is_identity(&self) -> subtle::Choice {
     self.a.is_one() & self.b.positive() & self.b.abs().is_one()
-  }
-
-  fn double(&self) -> Self {
-    self.add(self)
   }
 
   // Allegedly, Arndt's method, as specified on the Wikipedia page for binary quadratic forms
@@ -264,8 +276,141 @@ impl crate::Element for CryptoBigintElement {
     Self::reduce(log_2_a_bound, A, Integer::from(B), self.discriminant.clone())
   }
 
+  // A copy/paste of `Self::add` which removes the duplicated congruence for this specialization
+  fn double(&self) -> CryptoBigintElement {
+    let B_mu = &self.b;
+
+    let e = self.a.gcd(B_mu.abs());
+    let (A_div_e, _) = &self.a / &e;
+    let A = &A_div_e * &A_div_e;
+
+    let mod_1 = &A_div_e << 1;
+    let two_A = &A << 1;
+    let mut mod_3 = two_A.clone();
+
+    let congruence_1 = &self.b % &mod_1;
+    let congruence_3 = {
+      let congruence_3_rhs = &{
+        let congruence_3_rhs_numerator = &*self.discriminant + &(&self.b * &self.b);
+        let (congruence_3_rhs_mul_2, rem) = &congruence_3_rhs_numerator / &e;
+        debug_assert!(bool::from(rem.is_zero()));
+        congruence_3_rhs_mul_2.half()
+      } % &mod_3;
+
+      // We drop the remainder here because `e` is explicitly a divisor of `B_mu`
+      let congruence_3_lhs_factor = &(B_mu / &e).0 % &mod_3;
+
+      /*
+        We have `ax congruent to b mod c`.
+
+        We can't scale `b` by `a**-1` as `a` may not have a multiplicative inverse `mod c`. We
+        instead scale `a` by `u` where for `g = 1`, `a * u congruent to 1 mod c` (so `u` would be
+        the multiplicative inverse of `a` if `g = 1`). When `g != 1`, this generalizes as
+        `a * u congruent to g mod c`. Scaling `a` by `u` accordingly produces `a * a**-1 * g`,
+        which we convert to `a * a**-1` via integer division by `g`.
+      */
+      let (g, u, _v) = congruence_3_lhs_factor.extended_gcd(&mod_3);
+      let (res, rem) = &(&congruence_3_rhs * &u) / &g;
+      debug_assert!(bool::from(rem.is_zero()));
+      mod_3 = (&mod_3 / &g).0;
+      &res % &mod_3
+    };
+
+    // CRT generalized for coprime moduli
+    let crt = |congruence_1: &UnsignedInteger,
+               mod_1: &UnsignedInteger,
+               congruence_2: &UnsignedInteger,
+               mod_2: &UnsignedInteger|
+     -> (UnsignedInteger, UnsignedInteger) {
+      let (g, u, v) = mod_1.extended_gcd(mod_2);
+      debug_assert!(bool::from((congruence_1 % &g).ct_eq(&(congruence_2 % &g))));
+      let M = &(mod_1 / &g).0 * mod_2;
+      let x =
+        &(&Integer::from(congruence_1 * mod_2) * &v) + &(&Integer::from(congruence_2 * mod_1) * &u);
+      let (x, rem) = &x / &g;
+      debug_assert!(bool::from(rem.0.is_zero()));
+      debug_assert!(bool::from((&x % mod_1).ct_eq(congruence_1)));
+      debug_assert!(bool::from((&x % mod_2).ct_eq(congruence_2)));
+      (&x % &M, M)
+    };
+
+    let (x, _mod_123) = crt(&congruence_1, &mod_1, &congruence_3, &mod_3);
+
+    let B = x;
+
+    debug_assert!(bool::from(congruence_1.ct_eq(&(&B % &mod_1))));
+    debug_assert!(bool::from(congruence_3.ct_eq(&(&B % &mod_3))));
+
+    let max_bits_for_a = self.max_bits_for_a();
+    let log_2_a_1_bound = max_bits_for_a;
+    let log_2_a_2_bound = max_bits_for_a;
+    let log_2_a_bound = log_2_a_1_bound + log_2_a_2_bound;
+    Self::reduce(log_2_a_bound, A, Integer::from(B), self.discriminant.clone())
+  }
+
   fn sub(&self, other: CryptoBigintElement) -> CryptoBigintElement {
     self.add(&-other)
+  }
+
+  fn multiexp(identity: &Self, pairs: &[(&Table<Self>, &[u8])]) -> Self {
+    let mut longest_scalar_bits = 0;
+    for (_table, scalar) in pairs {
+      longest_scalar_bits = longest_scalar_bits.max(scalar.len() * 8);
+    }
+
+    let mut res: Option<Self> = None;
+    for i in 0 .. longest_scalar_bits {
+      // Shift over the existing result by a bit
+      if let Some(res) = res.as_mut() {
+        *res = res.double();
+      }
+
+      for (table, scalar) in pairs {
+        let scalar_bits = scalar.len() * 8;
+        // Transform the index of the bit in our longest scalar to the index of the bit in this one
+        let Some(i) = i.checked_sub(longest_scalar_bits - scalar_bits) else {
+          // If we're indexing a bit which doesn't exist in this scalar, continue
+          continue;
+        };
+
+        // If it's time to add this entry, do so
+        let table_bits = table.bits();
+        if ((i + 1) % table_bits) == 0 {
+          let mut accum = 0usize;
+          debug_assert_eq!(i - (i + 1 - table_bits) + 1, table_bits);
+          for i in (i + 1 - table_bits) ..= i {
+            accum <<= 1;
+            accum |= (usize::from(scalar[i / 8] >> (7 - (i % 8)))) & 1;
+          }
+
+          let mut to_add = Self::ct_select(&table[0], &table[1], 1.ct_eq(&accum));
+          for i in 2 .. table.as_ref().len() {
+            to_add = Self::ct_select(&to_add, &table[i], i.ct_eq(&accum));
+          }
+          res = Some(res.as_ref().map(|res| res.add(&to_add)).unwrap_or_else(|| to_add.clone()));
+        }
+      }
+    }
+
+    // Perform the final step of the accumulator
+    for (table, scalar) in pairs {
+      let scalar_bits = scalar.len() * 8;
+
+      let table_bits = table.bits();
+      let mut accum = 0usize;
+      for i in ((scalar_bits / table_bits) * table_bits) .. scalar_bits {
+        accum <<= 1;
+        accum |= (usize::from(scalar[i / 8] >> (7 - (i % 8)))) & 1;
+      }
+
+      let mut to_add = Self::ct_select(&table[0], &table[1], 1.ct_eq(&accum));
+      for i in 2 .. table.as_ref().len() {
+        to_add = Self::ct_select(&to_add, &table[i], i.ct_eq(&accum));
+      }
+      res = Some(res.as_ref().map(|res| res.add(&to_add)).unwrap_or_else(|| to_add.clone()));
+    }
+
+    res.unwrap_or_else(|| identity.clone())
   }
 
   fn from_be_abc_discriminant_tess_root_unchecked(

@@ -22,6 +22,12 @@ use crate::{malachite::natural_from_bytes, compression};
 pub trait Element:
   Sized + Send + Sync + Clone + Neg<Output = Self> + PartialEq + Eq + core::fmt::Debug
 {
+  /// The maximum amount of bits to create a table with.
+  ///
+  /// This allows backends which won't use larger tables to prevent redundant creation of such
+  /// large tables;
+  const MAX_TABLE_BITS: u32 = 16;
+
   /// Returns if the element is identity.
   fn is_identity(&self) -> subtle::Choice;
 
@@ -215,7 +221,7 @@ impl<E: Element> Table<E> {
   ///
   /// This function executes in constant-time w.r.t. `element` if `double, add` are constant-time.
   pub fn new(bits: u32, identity: E, element: E) -> Self {
-    let bits = bits.clamp(1, 16);
+    let bits = bits.clamp(1, E::MAX_TABLE_BITS);
     let len = 2usize.pow(bits);
     let mut res = Vec::with_capacity(len);
     res.push(identity);

@@ -419,7 +419,7 @@ fn test_class_group<E: Element>(mut rng: impl RngCore + CryptoRng) {
     res = res.add(&g[1].double());
     assert_eq!(res, E::mul(&g, &[2]));
 
-    let mut pow = g[256].clone();
+    let mut pow = g[255].clone().add(&g[1]);
     res = res.add(&pow);
     assert_eq!(res, E::mul(&g, &[1, 2]));
     for _ in 0 .. 8 {
@@ -533,6 +533,7 @@ fn bench() {
   use rand_chacha::ChaCha20Rng;
   const SEED: [u8; 32] = [0; 32];
   bench_class_group::<crate::MalachiteElement>(ChaCha20Rng::from_seed(SEED));
+  bench_class_group::<crate::CryptoBigintElement>(ChaCha20Rng::from_seed(SEED));
   #[cfg(feature = "gmp")]
   bench_class_group::<crate::GmpElement>(ChaCha20Rng::from_seed(SEED));
 }
