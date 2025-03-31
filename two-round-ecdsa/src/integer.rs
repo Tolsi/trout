@@ -1,4 +1,7 @@
-use core::ops::{Add, AddAssign, Mul};
+use core::{
+  borrow::Borrow,
+  ops::{Add, AddAssign, Mul},
+};
 
 use zeroize::{Zeroize, Zeroizing};
 use rand_core::{RngCore, CryptoRng};
@@ -65,19 +68,6 @@ impl AddAssign for UnsignedInteger {
 impl Mul for &UnsignedInteger {
   type Output = UnsignedInteger;
   fn mul(self, other: Self) -> UnsignedInteger {
-    let new_precision = self.0.bits_precision() + other.0.bits_precision();
-    let mut res = self.0.widen(new_precision);
-    res *= &other.0;
-    UnsignedInteger(res)
-  }
-}
-
-impl Mul<&BoxedUint> for &UnsignedInteger {
-  type Output = UnsignedInteger;
-  fn mul(self, other: &BoxedUint) -> UnsignedInteger {
-    let new_precision = self.0.bits_precision() + other.bits_precision();
-    let mut res = self.0.widen(new_precision);
-    res *= other;
-    UnsignedInteger(res)
+    UnsignedInteger(self.0.borrow().mul(&other.0))
   }
 }
