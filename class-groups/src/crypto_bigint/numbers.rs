@@ -365,7 +365,7 @@ impl UnsignedInteger {
     UnsignedInteger(a.as_ref().gcd(b.as_ref()))
   }
 
-  pub(crate) fn extended_gcd(&self, other: &Self) -> (UnsignedInteger, UnsignedInteger, Integer) {
+  pub(crate) fn extended_gcd_part(&self, other: &Self) -> (UnsignedInteger, UnsignedInteger) {
     debug_assert!(bool::from((!self.0.is_zero()) | (!other.0.is_zero())));
 
     let a = &self.0;
@@ -377,34 +377,17 @@ impl UnsignedInteger {
     let a_eq_b = a.ct_eq(b);
     let special_case = a_is_zero | b_is_zero | a_eq_b;
 
-    // Calculate the Bezout coefficients for non-identical, non-zero numbers
-    let u_v = |a: BoxedUint, b: BoxedUint, gcd: BoxedUint| {
-      // Calculate the multiplicative inverse of `(a / g) % (b / g)`, which is `u`
-      let u = {
-        let a_div_g = boxed_uint_div(&a, &gcd);
-        let b_div_g = boxed_uint_div(&b, &gcd);
+    // Calculate the multiplicative inverse of `(a / g) % (b / g)`, which is `u`
+    let u = |a: BoxedUint, b: BoxedUint, gcd: BoxedUint| {
+      let a_div_g = boxed_uint_div(&a, &gcd);
+      let b_div_g = boxed_uint_div(&b, &gcd);
 
-        let (a_div_g, b_div_g) = widen(&a_div_g, &b_div_g);
-        a_div_g.as_ref().inv_mod(b_div_g.as_ref()).unwrap()
-      };
-
-      // Calculate `v` via `ua + vb = g`, which should be faster than explicitly taking the inverse
-      let ua = &u * a;
-      let (v_1, _zero_if_v_1) = boxed_uint_div_rem(&(&gcd + &ua), &b);
-      let (difference, _gcd_is_greater) = difference(&ua, &gcd);
-      let (v_2, zero_if_v_2) = boxed_uint_div_rem(&difference, &b);
-      let zero_if_v_2_is_zero = zero_if_v_2.is_zero();
-      let v = boxed_uint_ct_select(&v_1, &v_2, zero_if_v_2_is_zero);
-
-      let u = UnsignedInteger(u);
-      let v = Integer::from(UnsignedInteger(v));
-      // TODO: ct_neg
-      let v = Integer::ct_select(&v, &-v.clone(), !u.is_zero());
-      (u, v)
+      let (a_div_g, b_div_g) = widen(&a_div_g, &b_div_g);
+      UnsignedInteger(a_div_g.as_ref().inv_mod(b_div_g.as_ref()).unwrap())
     };
 
     // Call with `a, b, gcd` if not a special case and `1, 2, 1` if a special case
-    let (u, v) = u_v(
+    let u = u(
       boxed_uint_ct_select(a, &BoxedUint::one(), special_case),
       boxed_uint_ct_select(b, &BoxedUint::from(2u8), special_case),
       boxed_uint_ct_select(&gcd, &BoxedUint::one(), special_case),
@@ -413,12 +396,43 @@ impl UnsignedInteger {
     // Correct for the cases `a == 0`, `b == 0`
     let u = UnsignedInteger::ct_select(&u, &UnsignedInteger(BoxedUint::zero()), a_is_zero);
     let u = UnsignedInteger::ct_select(&u, &UnsignedInteger(BoxedUint::one()), b_is_zero);
-    let v = Integer::ct_select(&v, &Integer::from(UnsignedInteger(BoxedUint::zero())), b_is_zero);
-    let v = Integer::ct_select(&v, &Integer::from(UnsignedInteger(BoxedUint::one())), a_is_zero);
 
     // Correct for the case `a == b`
     let u = UnsignedInteger::ct_select(&u, &UnsignedInteger(BoxedUint::one()), a_eq_b);
-    let v = Integer::ct_select(&v, &Integer::from(UnsignedInteger(BoxedUint::zero())), a_eq_b);
+
+    let gcd = UnsignedInteger(gcd);
+    (gcd, u)
+  }
+
+  pub(crate) fn extended_gcd(&self, other: &Self) -> (UnsignedInteger, UnsignedInteger, Integer) {
+    debug_assert!(bool::from((!self.0.is_zero()) | (!other.0.is_zero())));
+
+    let (gcd, u) = self.extended_gcd_part(other);
+    let gcd = gcd.0;
+    let a = &self.0;
+    let b = &other.0;
+
+    let b_is_zero = b.is_zero();
+
+    // Calculate `v` for `ua + vb = g`
+    let v = |b: BoxedUint| {
+      let ua = &u.0 * a;
+      let (difference, _gcd_is_greater) = difference(&ua, &gcd);
+      let (v, rem) = boxed_uint_div_rem(&difference, &b);
+      debug_assert!(bool::from(rem.is_zero()));
+
+      let v = Integer::from(UnsignedInteger(v));
+      // We prefer `u` to be positive and `v` to be negative, yet `v` will be positive if `u` is
+      // zero
+      // TODO: ct_neg
+      Integer::ct_select(&v, &-v.clone(), !u.is_zero())
+    };
+
+    // Call with `b` if not a special case and `1` if `b == 0`
+    let v = v(boxed_uint_ct_select(b, &BoxedUint::one(), b_is_zero));
+
+    // Correct for the case `b == 0`
+    let v = Integer::ct_select(&v, &Integer::from(UnsignedInteger(BoxedUint::zero())), b_is_zero);
 
     let gcd = UnsignedInteger(gcd);
 
@@ -426,8 +440,8 @@ impl UnsignedInteger {
       let recovered = &Integer::from(self * &u) + &(&v * other);
       debug_assert!(bool::from(recovered.positive));
       debug_assert_eq!(recovered.value.0, gcd.0);
-      debug_assert!(bool::from((!u.0.ct_gt(&boxed_uint_div(b, &gcd.0))) | special_case));
-      debug_assert!(bool::from((!v.value.0.ct_gt(&boxed_uint_div(a, &gcd.0))) | special_case));
+      debug_assert!(bool::from((!u.0.ct_gt(&boxed_uint_div(b, &gcd.0))) | b_is_zero));
+      debug_assert!(bool::from((!v.value.0.ct_gt(&boxed_uint_div(a, &gcd.0))) | a.is_zero()));
     }
 
     (gcd, u, v)
@@ -439,14 +453,14 @@ fn test_integer_sub() {
   // Positive minus smaller positive
   {
     let res = &Integer::from(UnsignedInteger(BoxedUint::from(2u8))) -
-      &Integer::from(UnsignedInteger(BoxedUint::from(1u8)));
+      &Integer::from(UnsignedInteger(BoxedUint::one()));
     assert!(bool::from(res.positive.ct_eq(&1.into())));
-    assert!(bool::from(res.value.0.ct_eq(&BoxedUint::from(1u8))));
+    assert!(bool::from(res.value.0.ct_eq(&BoxedUint::one())));
   }
   // Positive minus smaller negative
   {
     let res = &Integer::from(UnsignedInteger(BoxedUint::from(2u8))) -
-      &-Integer::from(UnsignedInteger(BoxedUint::from(1u8)));
+      &-Integer::from(UnsignedInteger(BoxedUint::one()));
     assert!(bool::from(res.positive.ct_eq(&1.into())));
     assert!(bool::from(res.value.0.ct_eq(&BoxedUint::from(3u8))));
   }
@@ -455,7 +469,7 @@ fn test_integer_sub() {
     let res = &Integer::from(UnsignedInteger(BoxedUint::from(2u8))) -
       &Integer::from(UnsignedInteger(BoxedUint::from(3u8)));
     assert!(bool::from(res.positive.ct_eq(&0.into())));
-    assert!(bool::from(res.value.0.ct_eq(&BoxedUint::from(1u8))));
+    assert!(bool::from(res.value.0.ct_eq(&BoxedUint::one())));
   }
   // Positive minus larger negative
   {
@@ -467,16 +481,16 @@ fn test_integer_sub() {
   // Negative minus smaller positive
   {
     let res = &-Integer::from(UnsignedInteger(BoxedUint::from(2u8))) -
-      &Integer::from(UnsignedInteger(BoxedUint::from(1u8)));
+      &Integer::from(UnsignedInteger(BoxedUint::one()));
     assert!(bool::from(res.positive.ct_eq(&0.into())));
     assert!(bool::from(res.value.0.ct_eq(&BoxedUint::from(3u8))));
   }
   // Negative minus smaller negative
   {
     let res = &-Integer::from(UnsignedInteger(BoxedUint::from(2u8))) -
-      &-Integer::from(UnsignedInteger(BoxedUint::from(1u8)));
+      &-Integer::from(UnsignedInteger(BoxedUint::one()));
     assert!(bool::from(res.positive.ct_eq(&0.into())));
-    assert!(bool::from(res.value.0.ct_eq(&BoxedUint::from(1u8))));
+    assert!(bool::from(res.value.0.ct_eq(&BoxedUint::one())));
   }
   // Negative minus larger positive
   {
@@ -490,7 +504,7 @@ fn test_integer_sub() {
     let res = &-Integer::from(UnsignedInteger(BoxedUint::from(2u8))) -
       &-Integer::from(UnsignedInteger(BoxedUint::from(3u8)));
     assert!(bool::from(res.positive.ct_eq(&1.into())));
-    assert!(bool::from(res.value.0.ct_eq(&BoxedUint::from(1u8))));
+    assert!(bool::from(res.value.0.ct_eq(&BoxedUint::one())));
   }
 }
 
@@ -586,6 +600,15 @@ fn gcd() {
     assert_eq!(gcd.0, BoxedUint::from(2u8));
     assert_eq!(u.0, BoxedUint::from(3u8));
     assert!(bool::from(v.positive.ct_eq(&0.into())));
-    assert_eq!(v.value.0, BoxedUint::from(1u8));
+    assert_eq!(v.value.0, BoxedUint::one());
+  }
+
+  {
+    let (gcd, u, v) =
+      UnsignedInteger(BoxedUint::from(2u8)).extended_gcd(&UnsignedInteger(BoxedUint::from(2u8)));
+    assert_eq!(gcd.0, BoxedUint::from(2u8));
+    assert_eq!(u.0, BoxedUint::one());
+    assert!(bool::from(v.positive.ct_eq(&1.into())));
+    assert_eq!(v.value.0, BoxedUint::zero());
   }
 }

@@ -233,7 +233,7 @@ impl crate::Element for CryptoBigintElement {
         `a * u congruent to g mod c`. Scaling `a` by `u` accordingly produces `a * a**-1 * g`,
         which we convert to `a * a**-1` via integer division by `g`.
       */
-      let (g, u, _v) = congruence_3_lhs_factor.extended_gcd(&mod_3);
+      let (g, u) = congruence_3_lhs_factor.extended_gcd_part(&mod_3);
       let (res, rem) = &(&congruence_3_rhs * &u) / &g;
       debug_assert!(bool::from(rem.is_zero()));
       mod_3 = (&mod_3 / &g).0;
@@ -309,7 +309,7 @@ impl crate::Element for CryptoBigintElement {
         `a * u congruent to g mod c`. Scaling `a` by `u` accordingly produces `a * a**-1 * g`,
         which we convert to `a * a**-1` via integer division by `g`.
       */
-      let (g, u, _v) = congruence_3_lhs_factor.extended_gcd(&mod_3);
+      let (g, u) = congruence_3_lhs_factor.extended_gcd_part(&mod_3);
       let (res, rem) = &(&congruence_3_rhs * &u) / &g;
       debug_assert!(bool::from(rem.is_zero()));
       mod_3 = (&mod_3 / &g).0;
