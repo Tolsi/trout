@@ -395,8 +395,8 @@ impl UnsignedInteger {
       let a_div_g = boxed_uint_div(&a, &gcd);
       let b_div_g = boxed_uint_div(&b, &gcd);
 
-      let (a_div_g, b_div_g) = widen(&a_div_g, &b_div_g);
-      UnsignedInteger(a_div_g.as_ref().inv_mod(b_div_g.as_ref()).unwrap())
+      let a_div_g = (&UnsignedInteger(a_div_g) % &UnsignedInteger(b_div_g.clone())).0;
+      UnsignedInteger(a_div_g.inv_mod(&b_div_g).unwrap())
     };
 
     // Call with `a, b, gcd` if not a special case and `1, 2, 1` if a special case
@@ -429,7 +429,8 @@ impl UnsignedInteger {
 
     // Calculate `v` for `ua + vb = g`
     let v = |b: BoxedUint| {
-      let ua = &u.0 * a;
+      // This mul should inherently widen, yet was still panicing as overflowing? TODO
+      let ua = &u.0 * a.widen(a.bits_precision() + 1);
       let (difference, _gcd_is_greater) = difference(&ua, &gcd);
       let (v, rem) = boxed_uint_div_rem(&difference, &b);
       debug_assert!(bool::from(rem.is_zero()));

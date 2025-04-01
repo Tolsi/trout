@@ -126,7 +126,7 @@ impl CryptoBigintElement {
       jump_to_step_three & (!to_continue)
     };
 
-    for _ in 0 .. iterations {
+    for i in 0 .. iterations {
       let two_a = &a << 1;
       // b / 2a
       let (mut q, r) = &b / &two_a;
@@ -162,11 +162,11 @@ impl CryptoBigintElement {
       let should_neg_b = a.ct_eq(&c) & (!b.positive());
       b = Integer::ct_select(&b, &neg_b, done & should_neg_b);
 
-      // `a` is set to `c` when `a > c`, and accordingly always reduces in size
-      a.shorten(start_a_bits);
+      // `a` is set to `c` when `a > c`, and accordingly always reduces in size by a bit
+      a.shorten(start_a_bits - i - 1);
       // `b` is set to `r` which is in the range `-a < r <= a`, or its own negative
       // If `b` entered this function unreduced, then `|b| <= a` and this is valid
-      b.abs_mut().shorten(start_a_bits);
+      b.abs_mut().shorten(start_a_bits - i);
       /*
         `c` was set to `c - 1/2(b+r)q` in step 2. In step 3, `c` is swapped with the former `a`
         (which always decreases in size) or the algorithm terminates. If the algorithm terminated,
