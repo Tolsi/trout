@@ -172,6 +172,7 @@ impl CryptoBigintStackElement {
       let should_neg_b = a.ct_eq(&c) & (!b.positive());
       b = <_>::ct_select(&b, &neg_b, done & should_neg_b);
     }
+    debug_assert!(bool::from(done));
 
     let (a_lo, a_hi): (U, U) = a.split();
     debug_assert!(bool::from(a_hi.is_zero()));

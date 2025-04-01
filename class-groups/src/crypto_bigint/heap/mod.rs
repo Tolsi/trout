@@ -98,7 +98,8 @@ impl CryptoBigintHeapElement {
     };
 
     // First, we establish the bound on the amount of iterations
-    let iterations = 2 + (log_2_a_bound - (discriminant.abs().bits().div_ceil(2) - 1));
+    let target_bits = discriminant.abs().bits().div_ceil(2);
+    let iterations = 2 + (log_2_a_bound - (target_bits - 1));
 
     // We start our reduction by implementing step 1 and step 3
     let mut done = {
@@ -164,10 +165,10 @@ impl CryptoBigintHeapElement {
       b = Integer::ct_select(&b, &neg_b, done & should_neg_b);
 
       // `a` is set to `c` when `a > c`, and accordingly always reduces in size by a bit
-      a.shorten(start_a_bits - i - 1);
+      a.shorten((start_a_bits - i - 1).max(target_bits));
       // `b` is set to `r` which is in the range `-a < r <= a`, or its own negative
       // If `b` entered this function unreduced, then `|b| <= a` and this is valid
-      b.abs_mut().shorten(start_a_bits - i);
+      b.abs_mut().shorten((start_a_bits - i).max(target_bits));
       /*
         `c` was set to `c - 1/2(b+r)q` in step 2. In step 3, `c` is swapped with the former `a`
         (which always decreases in size) or the algorithm terminates. If the algorithm terminated,
@@ -182,6 +183,7 @@ impl CryptoBigintHeapElement {
       */
       c.shorten(start_a_bits.max(discriminant.abs().precision()));
     }
+    debug_assert!(bool::from(done));
 
     let mut res = Self { a, b, discriminant };
     res.a.shorten(res.max_bits_for_a());
