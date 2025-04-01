@@ -18,21 +18,21 @@ use numbers::*;
 /// any size yet is only recommended for provers as it has a significant performance overhead to
 /// other backends, which verifiers should take advantage of.
 #[derive(Clone, Debug)]
-pub struct CryptoBigintElement {
+pub struct CryptoBigintHeapElement {
   a: UnsignedInteger,
   b: Integer,
   discriminant: Arc<Integer>,
 }
 
-impl PartialEq for CryptoBigintElement {
+impl PartialEq for CryptoBigintHeapElement {
   fn eq(&self, other: &Self) -> bool {
     (self.a.ct_eq(&other.a) & self.b.ct_eq(&other.b) & self.discriminant.ct_eq(&other.discriminant))
       .into()
   }
 }
-impl Eq for CryptoBigintElement {}
+impl Eq for CryptoBigintHeapElement {}
 
-impl Zeroize for CryptoBigintElement {
+impl Zeroize for CryptoBigintHeapElement {
   fn zeroize(&mut self) {
     // Zeroize
     self.a.zeroize();
@@ -45,7 +45,7 @@ impl Zeroize for CryptoBigintElement {
   }
 }
 
-impl crypto_bigint::ConstantTimeSelect for CryptoBigintElement {
+impl crypto_bigint::ConstantTimeSelect for CryptoBigintHeapElement {
   fn ct_select(a: &Self, b: &Self, choice: subtle::Choice) -> Self {
     Self {
       a: UnsignedInteger::ct_select(&a.a, &b.a, choice),
@@ -57,7 +57,7 @@ impl crypto_bigint::ConstantTimeSelect for CryptoBigintElement {
   }
 }
 
-impl CryptoBigintElement {
+impl CryptoBigintHeapElement {
   fn max_bits_for_a(&self) -> u32 {
     /*
       Immediately prior to lemma 5.4.4 of A Course in Computational Algebraic Number Theory,
@@ -191,7 +191,7 @@ impl CryptoBigintElement {
   }
 }
 
-impl crate::Element for CryptoBigintElement {
+impl crate::Element for CryptoBigintHeapElement {
   const MAX_TABLE_BITS: u32 = 8;
 
   fn is_identity(&self) -> subtle::Choice {
@@ -199,7 +199,7 @@ impl crate::Element for CryptoBigintElement {
   }
 
   // Allegedly, Arndt's method, as specified on the Wikipedia page for binary quadratic forms
-  fn add(&self, other: &Self) -> CryptoBigintElement {
+  fn add(&self, other: &Self) -> CryptoBigintHeapElement {
     let B_mu = (&self.b + &other.b).half();
 
     let e = self.a.gcd(&other.a).gcd(B_mu.abs());
@@ -278,7 +278,7 @@ impl crate::Element for CryptoBigintElement {
   }
 
   // A copy/paste of `Self::add` which removes the duplicated congruence for this specialization
-  fn double(&self) -> CryptoBigintElement {
+  fn double(&self) -> CryptoBigintHeapElement {
     let B_mu = &self.b;
 
     let e = self.a.gcd(B_mu.abs());
@@ -349,7 +349,7 @@ impl crate::Element for CryptoBigintElement {
     Self::reduce(log_2_a_bound, A, Integer::from(B), self.discriminant.clone())
   }
 
-  fn sub(&self, other: CryptoBigintElement) -> CryptoBigintElement {
+  fn sub(&self, other: CryptoBigintHeapElement) -> CryptoBigintHeapElement {
     self.add(&-other)
   }
 
@@ -456,7 +456,7 @@ impl crate::Element for CryptoBigintElement {
   }
 }
 
-impl Neg for CryptoBigintElement {
+impl Neg for CryptoBigintHeapElement {
   type Output = Self;
   fn neg(self) -> Self {
     Self::reduce(self.max_bits_for_a(), self.a, self.b.neg(), self.discriminant)

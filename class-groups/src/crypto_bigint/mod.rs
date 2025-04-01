@@ -1,2 +1,5 @@
+mod stack;
+pub use stack::CryptoBigintStackElement;
+
 mod heap;
-pub use heap::CryptoBigintElement;
+pub use heap::CryptoBigintHeapElement;

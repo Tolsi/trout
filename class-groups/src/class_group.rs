@@ -515,16 +515,18 @@ fn bench_class_group<E: Element>(mut rng: impl RngCore + CryptoRng) {
 fn malachite_class_group() {
   test_class_group::<crate::MalachiteElement>(&mut rand_core::OsRng);
 }
-
+#[test]
+fn crypto_bigint_stack_class_group() {
+  test_class_group::<crate::CryptoBigintStackElement>(&mut rand_core::OsRng);
+}
+#[test]
+fn crypto_bigint_heap_class_group() {
+  test_class_group::<crate::CryptoBigintHeapElement>(&mut rand_core::OsRng);
+}
 #[cfg(feature = "gmp")]
 #[test]
 fn gmp_class_group() {
   test_class_group::<crate::GmpElement>(&mut rand_core::OsRng);
-}
-
-#[test]
-fn crypto_bigint_class_group() {
-  test_class_group::<crate::CryptoBigintElement>(&mut rand_core::OsRng);
 }
 
 #[test]
@@ -533,7 +535,8 @@ fn bench() {
   use rand_chacha::ChaCha20Rng;
   const SEED: [u8; 32] = [0; 32];
   bench_class_group::<crate::MalachiteElement>(ChaCha20Rng::from_seed(SEED));
-  bench_class_group::<crate::CryptoBigintElement>(ChaCha20Rng::from_seed(SEED));
+  bench_class_group::<crate::CryptoBigintStackElement>(ChaCha20Rng::from_seed(SEED));
+  bench_class_group::<crate::CryptoBigintHeapElement>(ChaCha20Rng::from_seed(SEED));
   #[cfg(feature = "gmp")]
   bench_class_group::<crate::GmpElement>(ChaCha20Rng::from_seed(SEED));
 }

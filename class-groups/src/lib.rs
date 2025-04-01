@@ -12,7 +12,7 @@ mod malachite;
 pub use malachite::MalachiteElement;
 
 mod crypto_bigint;
-pub use crypto_bigint::CryptoBigintElement;
+pub use crypto_bigint::{CryptoBigintStackElement, CryptoBigintHeapElement};
 
 #[cfg(feature = "gmp")]
 mod gmp;
