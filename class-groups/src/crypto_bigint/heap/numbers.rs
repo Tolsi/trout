@@ -97,6 +97,7 @@ impl UnsignedInteger {
   }
 
   pub(crate) fn shorten(&mut self, bits: u32) {
+    debug_assert!(bool::from(self.0.bits().ct_lt(&bits) | self.0.bits().ct_eq(&bits)));
     self.0 = self.0.shorten(bits.min(self.0.bits_precision()));
   }
 
