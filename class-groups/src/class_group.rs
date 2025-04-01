@@ -475,7 +475,12 @@ fn test_class_group<E: Element>(mut rng: impl RngCore + CryptoRng) {
 
 #[cfg(test)]
 fn bench_class_group<E: Element>(mut rng: impl RngCore + CryptoRng) {
-  let class_group = ClassGroup::<E>::setup(&mut rng, 100, vec![19]).unwrap();
+  // Benchmark with the maximum size of class group supported by CryptoBigintStackElement
+  let prime = 19u8;
+  // The fundamental discriminant is of length `lambda * 2`, yet then that's scaled by `prime**2`
+  // `2560`, the target class group size, minus the logarithm of `prime**2`, divided by 2
+  let lambda = (2560 - u64::from((u64::from(prime) * u64::from(prime)).ilog2())) / 2;
+  let class_group = ClassGroup::<E>::setup(&mut rng, lambda, vec![19]).unwrap();
   let g = class_group.generator_p(&mut rng);
 
   {
