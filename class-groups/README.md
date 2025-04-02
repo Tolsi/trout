@@ -7,8 +7,14 @@ This library supports modular backends in order to enable evaluation of differen
 performance, and to enable a constant-time backend for secret-sensitive operations.
 
 Currently provided are the following backends:
+- `CryptoBigintStackElement`: An implementation which executes in constant-time to its `a, b`
+  coordinates, without allocating on composition. This implementation only supports discriminants
+  of up to `2560` bits and will panic if attempted to be used with larger discriminants.
+- `CryptoBigintHeapElement`: An implementation which executes in constant-time to its `a, b`
+  coordinates.
 - `MalachiteElement`: An implementation which uses `malachite`, a pure-Rust integer library.
-- `GmpElement`: An implementation which uses `gmp`. This is 20-30% faster than `MalachiteElement`.
+- `GmpElement`: An implementation which uses `gmp`. This is 20-30% faster than `MalachiteElement`
+  and should be preferred if linking to `gmp` is acceptable.
 
 `ClassGroup`s cannot be serialized and *SHOULD* be saved as the entropy used for a seeded RNG which
 creates them (such as `rand_chacha::ChaCha20Rng`). This same premise also allows creating the same

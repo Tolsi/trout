@@ -3,6 +3,9 @@ use core::ops::Neg;
 use rug::{*, integer::Order};
 
 /// An element of a class group, implemented with the variable-time gmp.
+///
+/// This requires linking to `gmp`, written in C. It is faster than the pure-Rust
+/// `MalachiteElement` and accordingly preferable on eligible platforms.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct GmpElement {
   a: Integer,

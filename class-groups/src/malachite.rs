@@ -58,6 +58,9 @@ fn parteucl(a: Integer, b: Integer, L: &Integer) -> (Integer, Integer, Integer, 
 }
 
 /// An element of a class group, implemented with the variable-time Malachite.
+///
+/// This is a pure-Rust implementation and does not have a dependency on libraries in other
+/// languages.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct MalachiteElement {
   a: Integer,

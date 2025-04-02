@@ -3,12 +3,12 @@ use core::ops::{Add, Neg, Sub, Mul, Div, Rem};
 use subtle::{Choice, ConstantTimeEq};
 use zeroize::Zeroize;
 
-use crypto_bigint::{
+use crypto_bigint_xgcd::{
   ConstantTimeSelect, WideningMul, Zero, NonZero, Odd, Integer, Uint, PrecomputeInverter,
   modular::SafeGcdInverter,
 };
 #[cfg(test)]
-use crypto_bigint::U256;
+use crypto_bigint_xgcd::U256;
 
 pub(crate) fn mul_arbitrary_uints<
   const LHS_LIMBS: usize,
@@ -223,9 +223,23 @@ where
   fn extended_gcd_part(self, other: Self) -> (Self, Self) {
     debug_assert!(bool::from((!self.ct_eq(&Self::zero())) | (!other.ct_eq(&Self::zero()))));
 
+    /* TODO: Move to this once `binxgcd` is fixed. Right now, the debug_assert occassionally trips.
+    let res = self.binxgcd(&other);
+    debug_assert!(!bool::from(
+      Choice::from(res.x.is_negative()) & Choice::from(res.y.is_negative())
+    ));
+    let g = res.gcd;
+    let u = res.x;
+
+    let u_abs = u.abs();
+    let u = <_>::ct_select(&u_abs, &(other / g).saturating_sub(&u_abs), u.is_negative().into());
+
+    (g, u)
+    */
+
     let a = self;
     let b = other;
-    let gcd = a.gcd(&b);
+    let gcd = a.bingcd(&b);
 
     let a_is_zero = a.ct_eq(&Self::zero());
     let b_is_zero = b.ct_eq(&Self::zero());
@@ -411,6 +425,14 @@ fn gcd() {
   }
 
   {
+    let (gcd, u, v) = U256::zero().extended_gcd(U256::one());
+    assert_eq!(gcd, U256::one());
+    assert_eq!(u, U256::zero());
+    assert!(bool::from(v.positive.ct_eq(&1.into())));
+    assert_eq!(v.value, U256::one());
+  }
+
+  {
     let (gcd, u, v) = U256::from(2u8).extended_gcd(U256::from(3u8));
     assert_eq!(gcd, U256::one());
     assert_eq!(u, U256::from(2u8));
@@ -427,6 +449,14 @@ fn gcd() {
   }
 
   {
+    let (gcd, u, v) = (U256::from(8u8)).extended_gcd(U256::from(4u8));
+    assert_eq!(gcd, U256::from(4u8));
+    assert_eq!(u, U256::ZERO);
+    assert!(bool::from(v.positive.ct_eq(&1.into())));
+    assert_eq!(v.value, U256::one());
+  }
+
+  {
     let (gcd, u, v) = (U256::from(4u8)).extended_gcd(U256::from(10u8));
     assert_eq!(gcd, U256::from(2u8));
     assert_eq!(u, U256::from(3u8));
@@ -440,5 +470,31 @@ fn gcd() {
     assert_eq!(u, U256::one());
     assert!(bool::from(v.positive.ct_eq(&1.into())));
     assert_eq!(v.value, U256::zero());
+  }
+
+  {
+    let (gcd, u, v) = (U256::from(10u8)).extended_gcd(U256::from(4u8));
+    assert_eq!(gcd, U256::from(2u8));
+    assert_eq!(u, U256::from(1u8));
+    assert!(bool::from(v.positive.ct_eq(&0.into())));
+    assert_eq!(v.value, U256::from(2u8));
+  }
+
+  {
+    let a = crypto_bigint_xgcd::U512::from_be_hex(concat!(
+      "0000000000000000000000000000000000000000000000000000000000000000",
+      "000000000000000000000000000000000000001A0DEEF6F3AC2566149D925044"
+    ));
+    let b = crypto_bigint_xgcd::U512::from_be_hex(concat!(
+      "0000000000000000000000000000000000000000000000000000000000000000",
+      "000000000000072B69C9DD0AA15F135675EA9C5180CF8FF0A59298CFC92E87FA"
+    ));
+    let (gcd, u, v) = a.extended_gcd(b);
+    // u * a + v * b = g
+    // v is either 0 or negative, so this is equivalent to
+    // u * a - |v| * b = g
+    // which is equivalent to
+    // u * a = g + |v| * b
+    assert_eq!(u * a, gcd + (v.value * b));
   }
 }

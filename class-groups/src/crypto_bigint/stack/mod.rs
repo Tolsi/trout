@@ -3,7 +3,7 @@ use core::ops::Neg;
 use subtle::{ConstantTimeEq, ConstantTimeLess, ConstantTimeGreater};
 use zeroize::Zeroize;
 
-use crypto_bigint::{ConstantTimeSelect, Zero, NonZero, Uint};
+use crypto_bigint_xgcd::{ConstantTimeSelect, Zero, NonZero, Uint};
 
 use crate::Table;
 
@@ -20,15 +20,15 @@ const BITS: u32 = 2688;
 // We use `U` to represent `a` which is bounded by the square root of the absolute value of the
 // discriminant, so its bit-length will be half of the absolute value of the discriminant's
 const A_BITS: u32 = BITS / 2;
-type U = Uint<{ crypto_bigint::nlimbs!(A_BITS) }>;
+type U = Uint<{ crypto_bigint_xgcd::nlimbs!(A_BITS) }>;
 // We use `I` to represent `b` which is bounded `-a < b < a`, so its absolute value fits into the
 // same amount of bits as `a` does
-type I = IStruct<Uint<{ crypto_bigint::nlimbs!(A_BITS) }>>;
+type I = IStruct<Uint<{ crypto_bigint_xgcd::nlimbs!(A_BITS) }>>;
 
-type WideU = Uint<{ crypto_bigint::nlimbs!(BITS) }>;
+type WideU = Uint<{ crypto_bigint_xgcd::nlimbs!(BITS) }>;
 type WideI = IStruct<WideU>;
 
-type WideWideU = Uint<{ crypto_bigint::nlimbs!(2 * BITS) }>;
+type WideWideU = Uint<{ crypto_bigint_xgcd::nlimbs!(2 * BITS) }>;
 type WideWideI = IStruct<WideWideU>;
 
 /// A constant-time element of a class group, implemented via crypto-bigint's `Uint, Int`.
@@ -69,7 +69,7 @@ impl Zeroize for CryptoBigintStackElement {
   }
 }
 
-impl crypto_bigint::ConstantTimeSelect for CryptoBigintStackElement {
+impl crypto_bigint_xgcd::ConstantTimeSelect for CryptoBigintStackElement {
   fn ct_select(a: &Self, b: &Self, choice: subtle::Choice) -> Self {
     Self {
       a: U::ct_select(&a.a, &b.a, choice),
@@ -261,8 +261,8 @@ impl crate::Element for CryptoBigintStackElement {
       mod_2: Uint<LIMBS>,
     ) -> (Uint<TWICE_LIMBS>, Uint<TWICE_LIMBS>)
     where
-      crypto_bigint::Odd<Uint<LIMBS>>: crypto_bigint::PrecomputeInverter<
-          Inverter = crypto_bigint::modular::SafeGcdInverter<LIMBS, UNSAT_LIMBS>,
+      crypto_bigint_xgcd::Odd<Uint<LIMBS>>: crypto_bigint_xgcd::PrecomputeInverter<
+          Inverter = crypto_bigint_xgcd::modular::SafeGcdInverter<LIMBS, UNSAT_LIMBS>,
         >,
     {
       let (g, u, v) = mod_1.extended_gcd(mod_2);
@@ -293,16 +293,16 @@ impl crate::Element for CryptoBigintStackElement {
     }
 
     let (congruence_12, mod_12): (WideU, WideU) = crt::<
-      { crypto_bigint::nlimbs!(BITS / 2) },
+      { crypto_bigint_xgcd::nlimbs!(BITS / 2) },
       { ((BITS / 2) + 64).div_ceil(62) as usize },
-      { crypto_bigint::nlimbs!(BITS) },
-      { crypto_bigint::nlimbs!(BITS + (BITS / 2)) },
+      { crypto_bigint_xgcd::nlimbs!(BITS) },
+      { crypto_bigint_xgcd::nlimbs!(BITS + (BITS / 2)) },
     >(congruence_1, mod_1, congruence_2, mod_2);
     let (x, _mod_123): (WideWideU, WideWideU) = crt::<
-      { crypto_bigint::nlimbs!(BITS) },
+      { crypto_bigint_xgcd::nlimbs!(BITS) },
       { (BITS + 64).div_ceil(62) as usize },
-      { crypto_bigint::nlimbs!(2 * BITS) },
-      { crypto_bigint::nlimbs!(3 * BITS) },
+      { crypto_bigint_xgcd::nlimbs!(2 * BITS) },
+      { crypto_bigint_xgcd::nlimbs!(3 * BITS) },
     >(congruence_12, mod_12, congruence_3, mod_3);
 
     let wide_two_A = WideWideU::from((two_A, Uint::ZERO));
@@ -381,8 +381,8 @@ impl crate::Element for CryptoBigintStackElement {
       mod_2: Uint<TWICE_LIMBS>,
     ) -> (Uint<THRICE_LIMBS>, Uint<QUAD_LIMBS>)
     where
-      crypto_bigint::Odd<Uint<TWICE_LIMBS>>: crypto_bigint::PrecomputeInverter<
-          Inverter = crypto_bigint::modular::SafeGcdInverter<TWICE_LIMBS, UNSAT_LIMBS>,
+      crypto_bigint_xgcd::Odd<Uint<TWICE_LIMBS>>: crypto_bigint_xgcd::PrecomputeInverter<
+          Inverter = crypto_bigint_xgcd::modular::SafeGcdInverter<TWICE_LIMBS, UNSAT_LIMBS>,
         >,
     {
       let mut wide_mod_1 = Uint::<TWICE_LIMBS>::ZERO;
@@ -419,15 +419,15 @@ impl crate::Element for CryptoBigintStackElement {
     }
 
     let (x, _mod_123) = crt::<
-      { crypto_bigint::nlimbs!(BITS / 2) },
-      { crypto_bigint::nlimbs!(BITS) },
+      { crypto_bigint_xgcd::nlimbs!(BITS / 2) },
+      { crypto_bigint_xgcd::nlimbs!(BITS) },
       { (BITS + 64).div_ceil(62) as usize },
-      { crypto_bigint::nlimbs!(3 * (BITS / 2)) },
-      { crypto_bigint::nlimbs!(4 * (BITS / 2)) },
-      { crypto_bigint::nlimbs!(5 * (BITS / 2)) },
+      { crypto_bigint_xgcd::nlimbs!(3 * (BITS / 2)) },
+      { crypto_bigint_xgcd::nlimbs!(4 * (BITS / 2)) },
+      { crypto_bigint_xgcd::nlimbs!(5 * (BITS / 2)) },
     >(congruence_1, mod_1, congruence_3, mod_3);
 
-    let mut wide_two_A = Uint::<{ crypto_bigint::nlimbs!(3 * (BITS / 2)) }>::ZERO;
+    let mut wide_two_A = Uint::<{ crypto_bigint_xgcd::nlimbs!(3 * (BITS / 2)) }>::ZERO;
     let two_A_words = two_A.as_words();
     wide_two_A.as_words_mut()[.. two_A_words.len()].copy_from_slice(two_A_words);
     let wide_B = x % wide_two_A;
