@@ -124,9 +124,9 @@ impl CryptoBigintStackElement {
       let to_continue = a.ct_gt(&c);
       // Only perform these writes if we jumped to step 3 and should continue
       let prepare_for_next_step = jump_to_step_three & to_continue;
-      let neg_b = -b.clone();
+      let neg_b = -b;
       b = <_>::ct_select(&b, &neg_b, prepare_for_next_step);
-      let a_copy = a.clone();
+      let a_copy = a;
       a = <_>::ct_select(&a, &c, prepare_for_next_step);
       c = <_>::ct_select(&c, &a_copy, prepare_for_next_step);
 
@@ -148,7 +148,7 @@ impl CryptoBigintStackElement {
 
       // Write the reduced `(c, b)` if we aren't already done
       let b_r = (b + r).half();
-      let next_c = WideI::from(c.clone()).widen::<WideWideU>() - (b_r * q);
+      let next_c = WideI::from(c).widen::<WideWideU>() - (b_r * q);
       debug_assert!(bool::from(next_c.positive()));
       // This is safe as for unreduced `a`, `c <= a / 2`
       let (next_c_lo, next_c_hi) = next_c.into_abs().split();
@@ -161,9 +161,9 @@ impl CryptoBigintStackElement {
       // Continuation clause
       let to_continue = a.ct_gt(&c);
       let prepare_for_next_step = !done & to_continue;
-      let neg_b = -b.clone();
+      let neg_b = -b;
       b = <_>::ct_select(&b, &neg_b, prepare_for_next_step);
-      let a_copy = a.clone();
+      let a_copy = a;
       a = <_>::ct_select(&a, &c, prepare_for_next_step);
       c = <_>::ct_select(&c, &a_copy, prepare_for_next_step);
 
@@ -201,14 +201,14 @@ impl crate::Element for CryptoBigintStackElement {
 
     let e: U = self.a.gcd(&other.a).gcd(B_mu.abs());
     let e = NonZero::new(e).unwrap();
-    let A1_div_e: U = self.a / &e;
-    let A2_div_e: U = other.a / &e;
+    let A1_div_e: U = self.a / e;
+    let A2_div_e: U = other.a / e;
     let A: WideU = A1_div_e.widening_mul(&A2_div_e);
 
     let mod_1: U = A1_div_e << 1;
     let mod_2: U = A2_div_e << 1;
     let two_A: WideU = A << 1;
-    let mut mod_3 = two_A.clone();
+    let mut mod_3 = two_A;
 
     let congruence_1 = self.b % mod_1;
     let congruence_2 = other.b % mod_2;
@@ -322,12 +322,12 @@ impl crate::Element for CryptoBigintStackElement {
 
     let e: U = self.a.gcd(B_mu.abs());
     let e = NonZero::new(e).unwrap();
-    let A_div_e: U = self.a / &e;
+    let A_div_e: U = self.a / e;
     let A: WideU = A_div_e.widening_mul(&A_div_e);
 
     let mod_1: U = A_div_e << 1;
     let two_A: WideU = A << 1;
-    let mut mod_3 = two_A.clone();
+    let mut mod_3 = two_A;
 
     let congruence_1 = self.b % mod_1;
     let e = e.get();
@@ -527,7 +527,7 @@ impl crate::Element for CryptoBigintStackElement {
 
     let b = I::from(U::from_be_slice(&full_bytes(usize::try_from(A_BITS).unwrap(), b)));
     // TODO: ct_neg
-    let b = I::ct_select(&-b.clone(), &b, b_positive);
+    let b = I::ct_select(&-b, &b, b_positive);
 
     Self {
       a: U::from_be_slice(&full_bytes(usize::try_from(A_BITS).unwrap(), a)),

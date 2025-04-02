@@ -44,7 +44,7 @@ pub(crate) struct IStruct<I: Copy + Integer> {
 }
 impl<I: Copy + Integer> IStruct<I> {
   pub(crate) fn positive(&self) -> Choice {
-    self.positive.into()
+    self.positive
   }
   pub(crate) fn abs(&self) -> &I {
     &self.value
@@ -54,7 +54,7 @@ impl<I: Copy + Integer> IStruct<I> {
   }
   #[must_use]
   pub(crate) fn half(mut self) -> Self {
-    self.value = self.value >> 1u32;
+    self.value >>= 1u32;
     self.positive = Choice::ct_select(&self.positive, &1.into(), self.value.ct_eq(&I::zero()));
     self
   }
@@ -138,6 +138,7 @@ impl<IRhs: Integer, I: Copy + WideningMul<IRhs, Output: Copy> + Integer> Mul<IRh
   type Output = IStruct<<I as WideningMul<IRhs>>::Output>;
   fn mul(self, other: IRhs) -> Self::Output {
     let value = self.value.widening_mul(other);
+    #[allow(clippy::suspicious_arithmetic_impl)]
     IStruct { positive: self.positive | value.is_zero(), value }
   }
 }
@@ -148,6 +149,7 @@ impl<IRhs: Copy + Integer, I: Copy + WideningMul<IRhs, Output: Copy> + Integer> 
   fn mul(self, other: IStruct<IRhs>) -> Self::Output {
     let value = self.value.widening_mul(other.value);
     // (positive * positive) | (negative * negative) | (0 * either)
+    #[allow(clippy::suspicious_arithmetic_impl)]
     let positive = self.positive.ct_eq(&other.positive) | value.is_zero();
     IStruct { positive, value }
   }
@@ -275,7 +277,6 @@ where
     debug_assert!(bool::from((!self.ct_eq(&Self::zero())) | (!other.ct_eq(&Self::zero()))));
 
     let (gcd, u) = self.extended_gcd_part(other);
-    let gcd = gcd;
     let a = self;
     let b = other;
 
@@ -292,7 +293,7 @@ where
       // We prefer `u` to be positive and `v` to be negative, yet `v` will be positive if `u` is
       // zero
       // TODO: ct_neg
-      IStruct::ct_select(&v, &-v.clone(), !u.ct_eq(&Self::zero()))
+      IStruct::ct_select(&v, &-v, !u.ct_eq(&Self::zero()))
     };
 
     // Call with `b` if not a special case and `1` if `b == 0`
@@ -309,13 +310,13 @@ where
 fn test_integer_sub() {
   // Positive minus smaller positive
   {
-    let res = IStruct::from(U256::from(2u8)) - IStruct::from(U256::one());
+    let res = IStruct::from(U256::from(2u8)) - IStruct::from(U256::ONE);
     assert!(bool::from(res.positive.ct_eq(&1.into())));
-    assert!(bool::from(res.value.ct_eq(&U256::one())));
+    assert!(bool::from(res.value.ct_eq(&U256::ONE)));
   }
   // Positive minus smaller negative
   {
-    let res = IStruct::from(U256::from(2u8)) - -IStruct::from(U256::one());
+    let res = IStruct::from(U256::from(2u8)) - -IStruct::from(U256::ONE);
     assert!(bool::from(res.positive.ct_eq(&1.into())));
     assert!(bool::from(res.value.ct_eq(&U256::from(3u8))));
   }
@@ -323,7 +324,7 @@ fn test_integer_sub() {
   {
     let res = IStruct::from(U256::from(2u8)) - IStruct::from(U256::from(3u8));
     assert!(bool::from(res.positive.ct_eq(&0.into())));
-    assert!(bool::from(res.value.ct_eq(&U256::one())));
+    assert!(bool::from(res.value.ct_eq(&U256::ONE)));
   }
   // Positive minus larger negative
   {
@@ -333,15 +334,15 @@ fn test_integer_sub() {
   }
   // Negative minus smaller positive
   {
-    let res = -IStruct::from(U256::from(2u8)) - IStruct::from(U256::one());
+    let res = -IStruct::from(U256::from(2u8)) - IStruct::from(U256::ONE);
     assert!(bool::from(res.positive.ct_eq(&0.into())));
     assert!(bool::from(res.value.ct_eq(&U256::from(3u8))));
   }
   // Negative minus smaller negative
   {
-    let res = -IStruct::from(U256::from(2u8)) - -IStruct::from(U256::one());
+    let res = -IStruct::from(U256::from(2u8)) - -IStruct::from(U256::ONE);
     assert!(bool::from(res.positive.ct_eq(&0.into())));
-    assert!(bool::from(res.value.ct_eq(&U256::one())));
+    assert!(bool::from(res.value.ct_eq(&U256::ONE)));
   }
   // Negative minus larger positive
   {
@@ -353,99 +354,99 @@ fn test_integer_sub() {
   {
     let res = -IStruct::from(U256::from(2u8)) - -IStruct::from(U256::from(3u8));
     assert!(bool::from(res.positive.ct_eq(&1.into())));
-    assert!(bool::from(res.value.ct_eq(&U256::one())));
+    assert!(bool::from(res.value.ct_eq(&U256::ONE)));
   }
 }
 
 #[test]
 fn test_integer_div() {
   let two = IStruct::from(U256::from(2u8));
-  let neg_two = -two.clone();
+  let neg_two = -two;
   let three = U256::from(3u8);
 
   {
     let (res, rem) = two / three;
     assert!(bool::from(res.positive.ct_eq(&1.into())));
-    assert_eq!(res.value, U256::zero());
+    assert_eq!(res.value, U256::ZERO);
     assert_eq!(rem, two.value);
   }
   {
     let (res, rem) = -IStruct::from(U256::from(6u8)) / three;
     assert!(bool::from(res.positive.ct_eq(&0.into())));
     assert_eq!(res.value, U256::from(2u8));
-    assert_eq!(rem, U256::zero());
+    assert_eq!(rem, U256::ZERO);
   }
   {
     let (res, rem) = neg_two / three;
     assert!(bool::from(res.positive.ct_eq(&0.into())));
-    assert_eq!(res.value, U256::one());
-    assert_eq!(rem, U256::one());
+    assert_eq!(res.value, U256::ONE);
+    assert_eq!(rem, U256::ONE);
   }
 
   let three = IStruct::from(three);
   {
     let (res, rem) = two / three;
     assert!(bool::from(res.positive.ct_eq(&1.into())));
-    assert_eq!(res.value, U256::zero());
+    assert_eq!(res.value, U256::ZERO);
     assert_eq!(rem, two.value);
   }
   {
     let (res, rem) = neg_two / three;
     assert!(bool::from(res.positive.ct_eq(&0.into())));
-    assert_eq!(res.value, U256::one());
-    assert_eq!(rem, U256::one());
+    assert_eq!(res.value, U256::ONE);
+    assert_eq!(rem, U256::ONE);
   }
 
   let neg_three = -three;
   {
     let (res, rem) = two / neg_three;
     assert!(bool::from(res.positive.ct_eq(&1.into())));
-    assert_eq!(res.value, U256::zero());
+    assert_eq!(res.value, U256::ZERO);
     assert_eq!(rem, two.value);
   }
   {
     let (res, rem) = neg_two / neg_three;
     assert!(bool::from(res.positive.ct_eq(&1.into())));
-    assert_eq!(res.value, U256::one());
-    assert_eq!(rem, U256::one());
+    assert_eq!(res.value, U256::ONE);
+    assert_eq!(rem, U256::ONE);
   }
 }
 
 #[test]
 fn gcd() {
   // Ensure the underlying crypto-bigint handles the case where one is zero correctly
-  assert_eq!(U256::one().gcd(&U256::zero()), U256::one());
+  assert_eq!(U256::ONE.gcd(&U256::ZERO), U256::ONE);
 
   {
-    let (gcd, u, v) = U256::one().extended_gcd(U256::zero());
-    assert_eq!(gcd, U256::one());
-    assert_eq!(u, U256::one());
+    let (gcd, u, v) = U256::ONE.extended_gcd(U256::ZERO);
+    assert_eq!(gcd, U256::ONE);
+    assert_eq!(u, U256::ONE);
     assert!(bool::from(v.positive.ct_eq(&1.into())));
-    assert_eq!(v.value, U256::zero());
+    assert_eq!(v.value, U256::ZERO);
   }
 
   {
-    let (gcd, u, v) = U256::zero().extended_gcd(U256::one());
-    assert_eq!(gcd, U256::one());
-    assert_eq!(u, U256::zero());
+    let (gcd, u, v) = U256::ZERO.extended_gcd(U256::ONE);
+    assert_eq!(gcd, U256::ONE);
+    assert_eq!(u, U256::ZERO);
     assert!(bool::from(v.positive.ct_eq(&1.into())));
-    assert_eq!(v.value, U256::one());
+    assert_eq!(v.value, U256::ONE);
   }
 
   {
     let (gcd, u, v) = U256::from(2u8).extended_gcd(U256::from(3u8));
-    assert_eq!(gcd, U256::one());
+    assert_eq!(gcd, U256::ONE);
     assert_eq!(u, U256::from(2u8));
     assert!(bool::from(v.positive.ct_eq(&0.into())));
-    assert_eq!(v.value, U256::one());
+    assert_eq!(v.value, U256::ONE);
   }
 
   {
     let (gcd, u, v) = (U256::from(4u8)).extended_gcd(U256::from(8u8));
     assert_eq!(gcd, U256::from(4u8));
-    assert_eq!(u, U256::one());
+    assert_eq!(u, U256::ONE);
     assert!(bool::from(v.positive.ct_eq(&1.into())));
-    assert_eq!(v.value, U256::zero());
+    assert_eq!(v.value, U256::ZERO);
   }
 
   {
@@ -453,7 +454,7 @@ fn gcd() {
     assert_eq!(gcd, U256::from(4u8));
     assert_eq!(u, U256::ZERO);
     assert!(bool::from(v.positive.ct_eq(&1.into())));
-    assert_eq!(v.value, U256::one());
+    assert_eq!(v.value, U256::ONE);
   }
 
   {
@@ -461,15 +462,15 @@ fn gcd() {
     assert_eq!(gcd, U256::from(2u8));
     assert_eq!(u, U256::from(3u8));
     assert!(bool::from(v.positive.ct_eq(&0.into())));
-    assert_eq!(v.value, U256::one());
+    assert_eq!(v.value, U256::ONE);
   }
 
   {
     let (gcd, u, v) = U256::from(2u8).extended_gcd(U256::from(2u8));
     assert_eq!(gcd, U256::from(2u8));
-    assert_eq!(u, U256::one());
+    assert_eq!(u, U256::ONE);
     assert!(bool::from(v.positive.ct_eq(&1.into())));
-    assert_eq!(v.value, U256::zero());
+    assert_eq!(v.value, U256::ZERO);
   }
 
   {
