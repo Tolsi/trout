@@ -290,8 +290,9 @@ impl crate::Element for CryptoBigintStackElement {
     >(congruence_1, mod_1, congruence_2, mod_2);
 
     // The above `crt` function, inlined as we use a more efficient variation here
-    let (x, _mod_123) = {
-      let (g, u, v, mod_12_div_g) = {
+    const THRICE_LIMBS: usize = crypto_bigint_xgcd::nlimbs!(3 * BITS);
+    let x = {
+      let (g, u, v) = {
         /*
           a = 2 (A1 / e), a >= 2
           b = 2 (A2 / e), b >= 2
@@ -347,16 +348,19 @@ impl crate::Element for CryptoBigintStackElement {
         );
         let v = <_>::ct_select(&v, &if_mod_3_eq_mod12_div_2.1, mod_3_eq_mod12_div_2);
 
-        let mod_12_div_g = <_>::ct_select(&Uint::from(2u8), &Uint::ONE, divisible_by_mod_12);
+        // let mod_12_div_g = <_>::ct_select(&Uint::from(2u8), &Uint::ONE, divisible_by_mod_12);
 
-        (g, u, v, mod_12_div_g)
+        (g, u, v)
       };
 
       const LIMBS: usize = crypto_bigint_xgcd::nlimbs!(BITS);
       const TWICE_LIMBS: usize = crypto_bigint_xgcd::nlimbs!(2 * BITS);
-      const THRICE_LIMBS: usize = crypto_bigint_xgcd::nlimbs!(3 * BITS);
 
-      let M = mul_arbitrary_uints::<LIMBS, LIMBS, TWICE_LIMBS>(mod_12_div_g, mod_3);
+      // This is commented out as we don't actually use `M` anywhere in the following calculations.
+      // We would reduce `x` by it, except we just reduce `x` by `2A` immediately after anyways.
+      // `gcd(mod_12, mod_3)` is `mod_12` or `mod_12 / 2`, meaning this is scaling by one or two
+      // let M = <_>::ct_select(&(mod_3 << 1), mod_3, mod_12_div_g.ct_eq(&Uint::ONE));
+
       let x1: IStruct<Uint<{ THRICE_LIMBS }>> =
         IStruct::<Uint<TWICE_LIMBS>>::from(mul_arbitrary_uints(congruence_12, mod_3)).mul_i_uint(v);
       let x2 = mul_arbitrary_uints::<TWICE_LIMBS, LIMBS, THRICE_LIMBS>(
@@ -371,19 +375,16 @@ impl crate::Element for CryptoBigintStackElement {
       let (x, rem) = x / wide_g;
       debug_assert!(bool::from(rem.is_zero()));
 
-      let mut wide_M = Uint::<{ THRICE_LIMBS }>::ZERO;
-      let M_words = M.as_words();
-      wide_M.as_words_mut()[.. M_words.len()].copy_from_slice(M_words);
-      let x = x % wide_M;
-      let mut res = Uint::<TWICE_LIMBS>::ZERO;
-      res.as_words_mut()[.. M_words.len()].copy_from_slice(&x.as_words()[.. M_words.len()]);
-      (res, M)
+      x
     };
 
-    let wide_two_A = WideWideU::from((two_A, Uint::ZERO));
-    let B = (x % wide_two_A).split();
-    debug_assert!(bool::from(B.1.is_zero()));
-    let B = B.0;
+    let mut wide_two_A = Uint::<{ THRICE_LIMBS }>::ZERO;
+    let two_A_words = two_A.as_words();
+    wide_two_A.as_words_mut()[.. two_A_words.len()].copy_from_slice(two_A_words);
+    let wide_B = x % wide_two_A;
+    let mut B = WideU::ZERO;
+    let B_words_len = B.as_words().len();
+    B.as_words_mut().copy_from_slice(&wide_B.as_words()[.. B_words_len]);
 
     // Since `A = (A_1 / e) * (A_2 / e)`, where `e = gcd(A_1, A_2, B_mu)`, we assume `e = 1` and
     // the bound on `log_2(A)` becomes `log_2(A_1 * A_2)`
@@ -454,14 +455,13 @@ impl crate::Element for CryptoBigintStackElement {
       mod_1: Uint<LIMBS>,
       congruence_2: Uint<TWICE_LIMBS>,
       mod_2: Uint<TWICE_LIMBS>,
-    ) -> (Uint<THRICE_LIMBS>, Uint<QUAD_LIMBS>) {
+    ) -> IStruct<Uint<FIVE_LIMBS>> {
       let mut wide_mod_1 = Uint::<TWICE_LIMBS>::ZERO;
       let mod_1_words = mod_1.as_words();
       wide_mod_1.as_words_mut()[.. mod_1_words.len()].copy_from_slice(mod_1_words);
 
-      let (g, u, v, mod_1_div_g) = wide_mod_1.extended_gcd(mod_2);
+      let (g, u, v, _mod_1_div_g) = wide_mod_1.extended_gcd(mod_2);
 
-      let M = mul_arbitrary_uints::<TWICE_LIMBS, TWICE_LIMBS, QUAD_LIMBS>(mod_1_div_g, mod_2);
       let x1: IStruct<Uint<{ FIVE_LIMBS }>> =
         IStruct::<Uint<THRICE_LIMBS>>::from(mul_arbitrary_uints(congruence_1, mod_2)).mul_i_uint(v);
       let x2 = mul_arbitrary_uints::<THRICE_LIMBS, TWICE_LIMBS, FIVE_LIMBS>(
@@ -476,34 +476,25 @@ impl crate::Element for CryptoBigintStackElement {
       let (x, rem) = x / wide_g;
       debug_assert!(bool::from(rem.is_zero()));
 
-      let mut wide_M = Uint::<{ FIVE_LIMBS }>::ZERO;
-      let M_words = M.as_words();
-      wide_M.as_words_mut()[.. M_words.len()].copy_from_slice(M_words);
-      let x = x % wide_M;
-
-      // `M` is `(mod_1 / g) * mod_2` where `mod_1` is `LIMBS` and `mod_2` is `THRICE_LIMBS`
-      let mut res = Uint::<THRICE_LIMBS>::ZERO;
-      let thrice_words_len = res.as_words().len();
-      res.as_words_mut().copy_from_slice(&x.as_words()[.. thrice_words_len]);
-      (res, M)
+      x
     }
 
-    let (x, _mod_123) = crt::<
+    const FIVE_LIMBS: usize = crypto_bigint_xgcd::nlimbs!(5 * (BITS / 2));
+    let x = crt::<
       { crypto_bigint_xgcd::nlimbs!(BITS / 2) },
       { crypto_bigint_xgcd::nlimbs!(BITS) },
       { crypto_bigint_xgcd::nlimbs!(3 * (BITS / 2)) },
       { crypto_bigint_xgcd::nlimbs!(4 * (BITS / 2)) },
-      { crypto_bigint_xgcd::nlimbs!(5 * (BITS / 2)) },
+      { FIVE_LIMBS },
     >(congruence_1, mod_1, congruence_3, mod_3);
 
-    let mut wide_two_A = Uint::<{ crypto_bigint_xgcd::nlimbs!(3 * (BITS / 2)) }>::ZERO;
+    let mut wide_two_A = Uint::<{ FIVE_LIMBS }>::ZERO;
     let two_A_words = two_A.as_words();
     wide_two_A.as_words_mut()[.. two_A_words.len()].copy_from_slice(two_A_words);
     let wide_B = x % wide_two_A;
-
     let mut B = WideU::ZERO;
-    let wide_words_len = B.as_words().len();
-    B.as_words_mut().copy_from_slice(&wide_B.as_words()[.. wide_words_len]);
+    let B_words_len = B.as_words().len();
+    B.as_words_mut().copy_from_slice(&wide_B.as_words()[.. B_words_len]);
 
     // Since `A = (A_1 / e) * (A_2 / e)`, where `e = gcd(A_1, A_2, B_mu)`, we assume `e = 1` and
     // the bound on `log_2(A)` becomes `log_2(A_1 * A_2)`
