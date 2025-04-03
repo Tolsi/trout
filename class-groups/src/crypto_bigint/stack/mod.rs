@@ -199,7 +199,7 @@ impl crate::Element for CryptoBigintStackElement {
   fn add(&self, other: &Self) -> CryptoBigintStackElement {
     let B_mu: I = (self.b + other.b).half();
 
-    let e: U = self.a.gcd(&other.a).gcd(B_mu.abs());
+    let e: U = self.a.bingcd(&other.a).bingcd(B_mu.abs());
     let e = NonZero::new(e).unwrap();
     let A1_div_e: U = self.a / e;
     let A2_div_e: U = other.a / e;
@@ -247,8 +247,7 @@ impl crate::Element for CryptoBigintStackElement {
       let res = res % wide_mod_3;
       // Since this modulus only used the low bits, this only has low bits
       let res = res.split().0;
-      let res = <_>::ct_select(&(mod_3 - res), &res, congruence_3_lhs_factor.positive());
-      res
+      <_>::ct_select(&(mod_3 - res), &res, congruence_3_lhs_factor.positive())
     };
 
     // CRT generalized for coprime moduli
@@ -318,7 +317,7 @@ impl crate::Element for CryptoBigintStackElement {
   fn double(&self) -> CryptoBigintStackElement {
     let B_mu: I = self.b;
 
-    let e: U = self.a.gcd(B_mu.abs());
+    let e: U = self.a.bingcd(B_mu.abs());
     let e = NonZero::new(e).unwrap();
     let A_div_e: U = self.a / e;
     let A: WideU = A_div_e.widening_mul(&A_div_e);
