@@ -380,7 +380,6 @@ impl crate::Element for CryptoBigintStackElement {
       */
       let (g, u, mod_3_div_g): (WideU, WideU, WideU) =
         congruence_3_lhs_factor.abs().extended_gcd_part(mod_3);
-      debug_assert_eq!(g, Uint::ONE);
       let wide_g = WideWideU::from((g, WideU::ZERO));
       let (res, rem): (WideWideU, WideWideU) =
         congruence_3_rhs.widening_mul(&u).div_rem(&NonZero::new(wide_g).unwrap());
@@ -395,30 +394,80 @@ impl crate::Element for CryptoBigintStackElement {
       <_>::ct_select(&(mod_3 - res), &res, congruence_3_lhs_factor.positive())
     };
 
-    // CRT generalized for coprime moduli
-    fn crt<
-      const LIMBS: usize,
-      const TWICE_LIMBS: usize,
-      const THRICE_LIMBS: usize,
-      const QUAD_LIMBS: usize,
-      const FIVE_LIMBS: usize,
-    >(
-      congruence_1: Uint<LIMBS>,
-      mod_1: Uint<LIMBS>,
-      congruence_2: Uint<TWICE_LIMBS>,
-      mod_2: Uint<TWICE_LIMBS>,
-    ) -> (Uint<THRICE_LIMBS>, Uint<QUAD_LIMBS>) {
-      let mut wide_mod_1 = Uint::<TWICE_LIMBS>::ZERO;
-      let mod_1_words = mod_1.as_words();
-      wide_mod_1.as_words_mut()[.. mod_1_words.len()].copy_from_slice(mod_1_words);
+    let x = {
+      let (g, u, v) = {
+        /*
+          a = 2 (A1 / e)
+          b = 2 (A2 / e)
+          c = (a * b) / 2
 
-      let (g, u, v, mod_1_div_g) = wide_mod_1.extended_gcd(mod_2);
+          We want to calculate `gcd(lcm(a, b), c)`.
 
-      let M = mul_arbitrary_uints::<TWICE_LIMBS, TWICE_LIMBS, QUAD_LIMBS>(mod_1_div_g, mod_2);
+          gcd(a * b / gcd(a, b), c)
+          gcd(a * b / gcd(2 AI / e, 2 A2 / e), c)
+          gcd(a * b / (2 gcd(AI / e, A2 / e)), c)
+          gcd(a * b / (2 gcd(AI / e, A2 / e)), a * b / 2)
+          gcd(a * b / 2 / gcd(AI / e, A2 / e), a * b / 2)
+
+          Please note how regardless of what the inner `gcd` yields, the second argument will be
+          divisible by the first argument. This lets us simplify the calculation of the outer
+          `gcd`.
+
+          The one complexity is in how `c` isn't `a * b / 2` yet
+          `a * b / 2 / gcd(B_mu / e, 2 A_1 * A_2 / e**2)`. `e = gcd(B_mu, A_1, A_2)` so `B_mu / e`
+          has no common factors with `A_1 * A_2 / e**2`. This is due to `e = gcd(B_mu, A_1, A_2)`.
+          If `A_1 != A_2`, then there may still be the common factors present in `B_mu, A_1` yet
+          not `A_2` (and vice versa), but `A_1 == A_2` when doubling. The only question is if
+          `B_mu / e` is divisible by `2`, bounding the `gcd` further divided by to being `1` or
+          `2`.
+
+          This means the second argument may not be divisible yet two times it will be, and still
+          lets us greatly accelerate calculation.
+        */
+        let mod_1 = Uint::from((mod_1, Uint::ZERO));
+        let divisible_by_mod_1 = (mod_3 % mod_1).is_zero();
+        let mod_1_div_2 = mod_1 >> 1;
+        // If not divisible by `mod_1`, then twice `mod_3` is, meaning divisble by half `mod_1`
+        // Since `mod_1, mod_2` are even, `mod_1` will be and half `mod_1` is well-defined
+        let g = <_>::ct_select(&mod_1, &mod_1_div_2, !divisible_by_mod_1);
+
+        // If `mod_3` is divisible by `mod_1`, then `u = 1, v = 0`
+        let if_divisble_by_mod12 = (WideU::ONE, IStruct::from(WideU::ZERO));
+        // If `mod_3` is greater than `mod_1` and divisible by `mod_1 / 2`, then
+        // `u = mod_3.div_ceil(mod_1), v = -1`
+        let if_gt_mod12_and_not_divisble_by_mod12 =
+          ((mod_3 / mod_1) + WideU::ONE, -IStruct::from(WideU::ONE));
+        // If `mod_3` is less than `mod_1` and divisible by `mod_1 / 2`, then
+        // `mod_3 = mod_1 / 2`, and `u = 0, v = 1.
+        let if_mod_3_eq_mod12_div_2 = (WideU::ZERO, IStruct::from(WideU::ONE));
+        let mod_3_eq_mod12_div_2 = mod_3.ct_eq(&mod_1_div_2);
+
+        let u = <_>::ct_select(
+          &if_gt_mod12_and_not_divisble_by_mod12.0,
+          &if_divisble_by_mod12.0,
+          divisible_by_mod_1,
+        );
+        let u = <_>::ct_select(&u, &if_mod_3_eq_mod12_div_2.0, mod_3_eq_mod12_div_2);
+
+        let v = <_>::ct_select(
+          &if_gt_mod12_and_not_divisble_by_mod12.1,
+          &if_divisble_by_mod12.1,
+          divisible_by_mod_1,
+        );
+        let v = <_>::ct_select(&v, &if_mod_3_eq_mod12_div_2.1, mod_3_eq_mod12_div_2);
+
+        (g, u, v)
+      };
+
+      const LIMBS: usize = crypto_bigint_xgcd::nlimbs!(BITS / 2);
+      const TWICE_LIMBS: usize = crypto_bigint_xgcd::nlimbs!(BITS);
+      const THRICE_LIMBS: usize = crypto_bigint_xgcd::nlimbs!(3 * (BITS / 2));
+      const FIVE_LIMBS: usize = crypto_bigint_xgcd::nlimbs!(5 * (BITS / 2));
+
       let x1: IStruct<Uint<{ FIVE_LIMBS }>> =
-        IStruct::<Uint<THRICE_LIMBS>>::from(mul_arbitrary_uints(congruence_1, mod_2)).mul_i_uint(v);
+        IStruct::<Uint<THRICE_LIMBS>>::from(mul_arbitrary_uints(congruence_1, mod_3)).mul_i_uint(v);
       let x2 = mul_arbitrary_uints::<THRICE_LIMBS, TWICE_LIMBS, FIVE_LIMBS>(
-        mul_arbitrary_uints::<TWICE_LIMBS, LIMBS, THRICE_LIMBS>(congruence_2, mod_1),
+        mul_arbitrary_uints::<TWICE_LIMBS, LIMBS, THRICE_LIMBS>(congruence_3, mod_1),
         u,
       );
       let x = x1 + x2;
@@ -429,27 +478,10 @@ impl crate::Element for CryptoBigintStackElement {
       let (x, rem) = x / wide_g;
       debug_assert!(bool::from(rem.is_zero()));
 
-      let mut wide_M = Uint::<{ FIVE_LIMBS }>::ZERO;
-      let M_words = M.as_words();
-      wide_M.as_words_mut()[.. M_words.len()].copy_from_slice(M_words);
-      let x = x % wide_M;
+      x
+    };
 
-      // `M` is `(mod_1 / g) * mod_2` where `mod_1` is `LIMBS` and `mod_2` is `THRICE_LIMBS`
-      let mut res = Uint::<THRICE_LIMBS>::ZERO;
-      let thrice_words_len = res.as_words().len();
-      res.as_words_mut().copy_from_slice(&x.as_words()[.. thrice_words_len]);
-      (res, M)
-    }
-
-    let (x, _mod_123) = crt::<
-      { crypto_bigint_xgcd::nlimbs!(BITS / 2) },
-      { crypto_bigint_xgcd::nlimbs!(BITS) },
-      { crypto_bigint_xgcd::nlimbs!(3 * (BITS / 2)) },
-      { crypto_bigint_xgcd::nlimbs!(4 * (BITS / 2)) },
-      { crypto_bigint_xgcd::nlimbs!(5 * (BITS / 2)) },
-    >(congruence_1, mod_1, congruence_3, mod_3);
-
-    let mut wide_two_A = Uint::<{ crypto_bigint_xgcd::nlimbs!(3 * (BITS / 2)) }>::ZERO;
+    let mut wide_two_A = Uint::<{ crypto_bigint_xgcd::nlimbs!(5 * (BITS / 2)) }>::ZERO;
     let two_A_words = two_A.as_words();
     wide_two_A.as_words_mut()[.. two_A_words.len()].copy_from_slice(two_A_words);
     let wide_B = x % wide_two_A;
