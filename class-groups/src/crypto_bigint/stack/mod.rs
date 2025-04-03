@@ -257,7 +257,7 @@ impl crate::Element for CryptoBigintStackElement {
       mod_1: Uint<LIMBS>,
       congruence_2: Uint<LIMBS>,
       mod_2: Uint<LIMBS>,
-    ) -> (Uint<TWICE_LIMBS>, Uint<TWICE_LIMBS>) {
+    ) -> (IStruct<Uint<THRICE_LIMBS>>, Uint<TWICE_LIMBS>) {
       let (g, u, v, mod_1_div_g) = mod_1.extended_gcd(mod_2);
       debug_assert!(bool::from((congruence_1 % g).ct_eq(&(congruence_2 % g))));
 
@@ -276,116 +276,37 @@ impl crate::Element for CryptoBigintStackElement {
       let (x, rem) = x / wide_g;
       debug_assert!(bool::from(rem.is_zero()));
 
-      let mut wide_M = Uint::<{ THRICE_LIMBS }>::ZERO;
-      let M_words = M.as_words();
-      wide_M.as_words_mut()[.. M_words.len()].copy_from_slice(M_words);
-      let x = x % wide_M;
-      let mut res = Uint::<TWICE_LIMBS>::ZERO;
-      res.as_words_mut()[.. M_words.len()].copy_from_slice(&x.as_words()[.. M_words.len()]);
-      (res, M)
+      (x, M)
     }
 
-    let (congruence_12, mod_12): (WideU, WideU) = crt::<
+    let (wide_congruence_12, mod_12): (_, WideU) = crt::<
       { crypto_bigint_xgcd::nlimbs!(BITS / 2) },
       { crypto_bigint_xgcd::nlimbs!(BITS) },
       { crypto_bigint_xgcd::nlimbs!(BITS + (BITS / 2)) },
     >(congruence_1, mod_1, congruence_2, mod_2);
 
-    // The above `crt` function, inlined as we use a more efficient variation here
-    let (x, _mod_123) = {
-      let (g, u, v, mod_12_div_g) = {
-        /*
-          a = 2 (A1 / e), a >= 2
-          b = 2 (A2 / e), b >= 2
-          c = (a * b) / 2, c >= 2
+    let mut wide_mod_12 = Uint::<{ crypto_bigint_xgcd::nlimbs!(BITS + (BITS / 2)) }>::ZERO;
+    let mod_12_words = mod_12.as_words();
+    wide_mod_12.as_words_mut()[.. mod_12_words.len()].copy_from_slice(mod_12_words);
+    let wide_congruence_12 = wide_congruence_12 % wide_mod_12;
 
-          We want to calculate `gcd(lcm(a, b), c)`.
+    let mut congruence_12 = WideU::ZERO;
+    let wide_words_len = congruence_12.as_words().len();
+    congruence_12.as_words_mut().copy_from_slice(&wide_congruence_12.as_words()[.. wide_words_len]);
 
-          gcd(a * b / gcd(a, b), c)
-          gcd(a * b / gcd(2 AI / e, 2 A2 / e), c)
-          gcd(a * b / (2 gcd(AI / e, A2 / e)), c)
-          gcd(a * b / (2 gcd(AI / e, A2 / e)), a * b / 2)
-          gcd(a * b / 2 / gcd(AI / e, A2 / e), a * b / 2)
+    let (x, _mod_123): (_, WideWideU) = crt::<
+      { crypto_bigint_xgcd::nlimbs!(BITS) },
+      { crypto_bigint_xgcd::nlimbs!(2 * BITS) },
+      { crypto_bigint_xgcd::nlimbs!(3 * BITS) },
+    >(congruence_12, mod_12, congruence_3, mod_3);
 
-          Please note how regardless of what the inner `gcd` yields, the second argument will be
-          divisble by the first argument. This lets us simplify the calculation of the outer `gcd`.
+    let mut wide_two_A = Uint::<{ crypto_bigint_xgcd::nlimbs!(3 * BITS) }>::ZERO;
+    let two_A_words = two_A.as_words();
+    wide_two_A.as_words_mut()[.. two_A_words.len()].copy_from_slice(two_A_words);
+    let wide_B = x % wide_two_A;
 
-          The once complexity is in how `c` isn't `a * b / 2` yet
-          `a * b / 2 / gcd(B_mu / e, 2 A_1 * A_2 / e**2)`. `e = gcd(B_mu, A_1, A_2)` so `B_mu / e`
-          has no common factors with `A_1 * A_2 / e**2`. The only question is if `B_mu / e` is
-          divisible by `2`, bounding the `gcd` further divided by to being `1` or `2`.
-
-          This means the second argument may not be divisible yet two times it will be, and still
-          lets us greatly accelerate calculation.
-        */
-        let divisible_by_mod_12 = (mod_3 % mod_12).is_zero();
-        let mod_12_div_2 = mod_12 >> 1;
-        // If not divisible by `mod_12`, then twice `mod_3` is, meaning divisble by half `mod_12`
-        // Since `mod_1, mod_2` are even, `mod_12` will be and half `mod_12` is well-defined
-        let g = <_>::ct_select(&mod_12, &mod_12_div_2, !divisible_by_mod_12);
-
-        // If `mod_3` is divisible by `mod_12`, then `u = 1, v = 0`
-        let if_divisble_by_mod12 = (WideU::ONE, IStruct::from(WideU::ZERO));
-        // If `mod_3` is greater than `mod_12` and divisible by `mod_12 / 2`, then
-        // `u = mod_3.div_ceil(mod_12), v = -1`
-        let if_gt_mod12_and_not_divisble_by_mod12 =
-          ((mod_3 / mod_12) + WideU::ONE, -IStruct::from(WideU::ONE));
-        // If `mod_3` is less than `mod_12` and divisible by `mod_12 / 2`, then
-        // `mod_3 = mod_12 / 2`, and `u = 0, v = 1.
-        let if_mod_3_eq_mod12_div_2 = (WideU::ZERO, IStruct::from(WideU::ONE));
-        let mod_3_eq_mod12_div_2 = mod_3.ct_eq(&mod_12_div_2);
-
-        let u = <_>::ct_select(
-          &if_gt_mod12_and_not_divisble_by_mod12.0,
-          &if_divisble_by_mod12.0,
-          divisible_by_mod_12,
-        );
-        let u = <_>::ct_select(&u, &if_mod_3_eq_mod12_div_2.0, mod_3_eq_mod12_div_2);
-
-        let v = <_>::ct_select(
-          &if_gt_mod12_and_not_divisble_by_mod12.1,
-          &if_divisble_by_mod12.1,
-          divisible_by_mod_12,
-        );
-        let v = <_>::ct_select(&v, &if_mod_3_eq_mod12_div_2.1, mod_3_eq_mod12_div_2);
-
-        let mod_12_div_g = <_>::ct_select(&Uint::from(2u8), &Uint::ONE, divisible_by_mod_12);
-
-        (g, u, v, mod_12_div_g)
-      };
-
-      const LIMBS: usize = crypto_bigint_xgcd::nlimbs!(BITS);
-      const TWICE_LIMBS: usize = crypto_bigint_xgcd::nlimbs!(2 * BITS);
-      const THRICE_LIMBS: usize = crypto_bigint_xgcd::nlimbs!(3 * BITS);
-
-      let M = mul_arbitrary_uints::<LIMBS, LIMBS, TWICE_LIMBS>(mod_12_div_g, mod_3);
-      let x1: IStruct<Uint<{ THRICE_LIMBS }>> =
-        IStruct::<Uint<TWICE_LIMBS>>::from(mul_arbitrary_uints(congruence_12, mod_3)).mul_i_uint(v);
-      let x2 = mul_arbitrary_uints::<TWICE_LIMBS, LIMBS, THRICE_LIMBS>(
-        mul_arbitrary_uints::<LIMBS, LIMBS, TWICE_LIMBS>(congruence_3, mod_12),
-        u,
-      );
-      let x = x1 + x2;
-
-      let g_words = g.as_words();
-      let mut wide_g = Uint::<{ THRICE_LIMBS }>::ZERO;
-      wide_g.as_words_mut()[.. g_words.len()].copy_from_slice(g_words);
-      let (x, rem) = x / wide_g;
-      debug_assert!(bool::from(rem.is_zero()));
-
-      let mut wide_M = Uint::<{ THRICE_LIMBS }>::ZERO;
-      let M_words = M.as_words();
-      wide_M.as_words_mut()[.. M_words.len()].copy_from_slice(M_words);
-      let x = x % wide_M;
-      let mut res = Uint::<TWICE_LIMBS>::ZERO;
-      res.as_words_mut()[.. M_words.len()].copy_from_slice(&x.as_words()[.. M_words.len()]);
-      (res, M)
-    };
-
-    let wide_two_A = WideWideU::from((two_A, Uint::ZERO));
-    let B = (x % wide_two_A).split();
-    debug_assert!(bool::from(B.1.is_zero()));
-    let B = B.0;
+    let mut B = WideU::ZERO;
+    B.as_words_mut().copy_from_slice(&wide_B.as_words()[.. wide_words_len]);
 
     // Since `A = (A_1 / e) * (A_2 / e)`, where `e = gcd(A_1, A_2, B_mu)`, we assume `e = 1` and
     // the bound on `log_2(A)` becomes `log_2(A_1 * A_2)`
