@@ -3,10 +3,7 @@ use core::ops::{Add, Neg, Sub, Mul, Div, Rem};
 use subtle::{Choice, ConstantTimeEq};
 use zeroize::Zeroize;
 
-use crypto_bigint_xgcd::{
-  ConstantTimeSelect, WideningMul, Zero, NonZero, Odd, Integer, Uint, PrecomputeInverter,
-  modular::SafeGcdInverter,
-};
+use crypto_bigint_xgcd::{ConstantTimeSelect, WideningMul, Zero, NonZero, Integer, Uint};
 #[cfg(test)]
 use crypto_bigint_xgcd::U256;
 
@@ -215,94 +212,56 @@ impl<I: Copy + Zeroize + Integer> Zeroize for IStruct<I> {
 }
 
 pub(crate) trait ExtendedGcd: Copy + Sized + Integer {
-  fn extended_gcd_part(self, other: Self) -> (Self, Self);
-  fn extended_gcd(self, other: Self) -> (Self, Self, IStruct<Self>);
+  // (g, u, other / g)
+  fn extended_gcd_part(self, other: Self) -> (Self, Self, Self);
+  // (g, u, v, self / g)
+  fn extended_gcd(self, other: Self) -> (Self, Self, IStruct<Self>, Self);
 }
-impl<const LIMBS: usize, const UNSAT_LIMBS: usize> ExtendedGcd for Uint<LIMBS>
-where
-  Odd<Self>: PrecomputeInverter<Inverter = SafeGcdInverter<LIMBS, UNSAT_LIMBS>>,
-{
-  fn extended_gcd_part(self, other: Self) -> (Self, Self) {
+impl<const LIMBS: usize> ExtendedGcd for Uint<LIMBS> {
+  fn extended_gcd_part(self, other: Self) -> (Self, Self, Self) {
     debug_assert!(bool::from((!self.ct_eq(&Self::zero())) | (!other.ct_eq(&Self::zero()))));
 
-    /* TODO: Move to this once `binxgcd` is fixed. Right now, the debug_assert occassionally trips.
     let res = self.binxgcd(&other);
     debug_assert!(!bool::from(
       Choice::from(res.x.is_negative()) & Choice::from(res.y.is_negative())
     ));
     let g = res.gcd;
     let u = res.x;
+    let other_div_g = res.rhs_on_gcd;
 
     let u_abs = u.abs();
-    let u = <_>::ct_select(&u_abs, &(other / g).saturating_sub(&u_abs), u.is_negative().into());
+    let u = <_>::ct_select(&u_abs, &other_div_g.saturating_sub(&u_abs), u.is_negative().into());
 
-    (g, u)
-    */
-
-    let a = self;
-    let b = other;
-    let gcd = a.bingcd(&b);
-
-    let a_is_zero = a.ct_eq(&Self::zero());
-    let b_is_zero = b.ct_eq(&Self::zero());
-    let a_eq_b = a.ct_eq(&b);
-    let special_case = a_is_zero | b_is_zero | a_eq_b;
-
-    // Calculate the multiplicative inverse of `(a / g) % (b / g)`, which is `u`
-    let u = |a: Self, b: Self, gcd: Self| {
-      let gcd = NonZero::new(gcd).unwrap();
-      let a_div_g = a / gcd;
-      let b_div_g = b / gcd;
-      a_div_g.inv_mod(&b_div_g).unwrap()
-    };
-
-    // Call with `a, b, gcd` if not a special case and `1, 2, 1` if a special case
-    let u = u(
-      Self::ct_select(&a, &Self::one(), special_case),
-      Self::ct_select(&b, &Self::from(2u8), special_case),
-      Self::ct_select(&gcd, &Self::one(), special_case),
-    );
-
-    // Correct for the cases `a == 0`, `b == 0`
-    let u = Self::ct_select(&u, &(Self::zero()), a_is_zero);
-    let u = Self::ct_select(&u, &Self::one(), b_is_zero);
-
-    // Correct for the case `a == b`
-    let u = Self::ct_select(&u, &Self::one(), a_eq_b);
-
-    (gcd, u)
+    (g, u, other_div_g)
   }
 
-  fn extended_gcd(self, other: Self) -> (Self, Self, IStruct<Self>) {
+  fn extended_gcd(self, other: Self) -> (Self, Self, IStruct<Self>, Self) {
     debug_assert!(bool::from((!self.ct_eq(&Self::zero())) | (!other.ct_eq(&Self::zero()))));
 
-    let (gcd, u) = self.extended_gcd_part(other);
-    let a = self;
-    let b = other;
+    let res = self.binxgcd(&other);
+    debug_assert!(!bool::from(
+      Choice::from(res.x.is_negative()) & Choice::from(res.y.is_negative())
+    ));
+    let g = res.gcd;
+    let u = res.x;
+    let v = res.y;
+    let self_div_g = res.lhs_on_gcd;
+    let other_div_g = res.rhs_on_gcd;
 
-    let b_is_zero = b.ct_eq(&Self::zero());
+    let u_is_neg = Choice::from(u.is_negative());
+    let u_abs = u.abs();
+    let u = <_>::ct_select(&u_abs, &other_div_g.saturating_sub(&u_abs), u_is_neg);
 
-    // Calculate `v` for `ua + vb = g`
-    let v = |b: Self| {
-      let ua = u * a;
-      let (difference, _gcd_is_greater) = difference(&ua, &gcd);
-      let (v, rem) = difference.div_rem(&NonZero::new(b).unwrap());
-      debug_assert!(bool::from(rem.ct_eq(&Self::zero())));
+    let v_is_neg = Choice::from(v.is_negative());
+    let v_abs = v.abs();
+    let v_abs = <_>::ct_select(&v_abs, &self_div_g.saturating_sub(&v_abs), u_is_neg);
+    let v = IStruct::from(v_abs);
+    // Restore the sign `v` originally had
+    let v = <_>::ct_select(&v, &-v, v_is_neg);
+    // If we negated `u`, negate `v`
+    let v = <_>::ct_select(&v, &-v, u_is_neg);
 
-      let v = IStruct::from(v);
-      // We prefer `u` to be positive and `v` to be negative, yet `v` will be positive if `u` is
-      // zero
-      // TODO: ct_neg
-      IStruct::ct_select(&v, &-v, !u.ct_eq(&Self::zero()))
-    };
-
-    // Call with `b` if not a special case and `1` if `b == 0`
-    let v = v(Self::ct_select(&b, &Self::one(), b_is_zero));
-
-    // Correct for the case `b == 0`
-    let v = IStruct::ct_select(&v, &IStruct::from(Self::zero()), b_is_zero);
-
-    (gcd, u, v)
+    (g, u, v, self_div_g)
   }
 }
 
@@ -418,7 +377,7 @@ fn gcd() {
   assert_eq!(U256::ONE.gcd(&U256::ZERO), U256::ONE);
 
   {
-    let (gcd, u, v) = U256::ONE.extended_gcd(U256::ZERO);
+    let (gcd, u, v, _) = U256::ONE.extended_gcd(U256::ZERO);
     assert_eq!(gcd, U256::ONE);
     assert_eq!(u, U256::ONE);
     assert!(bool::from(v.positive.ct_eq(&1.into())));
@@ -426,7 +385,7 @@ fn gcd() {
   }
 
   {
-    let (gcd, u, v) = U256::ZERO.extended_gcd(U256::ONE);
+    let (gcd, u, v, _) = U256::ZERO.extended_gcd(U256::ONE);
     assert_eq!(gcd, U256::ONE);
     assert_eq!(u, U256::ZERO);
     assert!(bool::from(v.positive.ct_eq(&1.into())));
@@ -434,7 +393,7 @@ fn gcd() {
   }
 
   {
-    let (gcd, u, v) = U256::from(2u8).extended_gcd(U256::from(3u8));
+    let (gcd, u, v, _) = U256::from(2u8).extended_gcd(U256::from(3u8));
     assert_eq!(gcd, U256::ONE);
     assert_eq!(u, U256::from(2u8));
     assert!(bool::from(v.positive.ct_eq(&0.into())));
@@ -442,7 +401,7 @@ fn gcd() {
   }
 
   {
-    let (gcd, u, v) = (U256::from(4u8)).extended_gcd(U256::from(8u8));
+    let (gcd, u, v, _) = (U256::from(4u8)).extended_gcd(U256::from(8u8));
     assert_eq!(gcd, U256::from(4u8));
     assert_eq!(u, U256::ONE);
     assert!(bool::from(v.positive.ct_eq(&1.into())));
@@ -450,7 +409,7 @@ fn gcd() {
   }
 
   {
-    let (gcd, u, v) = (U256::from(8u8)).extended_gcd(U256::from(4u8));
+    let (gcd, u, v, _) = (U256::from(8u8)).extended_gcd(U256::from(4u8));
     assert_eq!(gcd, U256::from(4u8));
     assert_eq!(u, U256::ZERO);
     assert!(bool::from(v.positive.ct_eq(&1.into())));
@@ -458,7 +417,7 @@ fn gcd() {
   }
 
   {
-    let (gcd, u, v) = (U256::from(4u8)).extended_gcd(U256::from(10u8));
+    let (gcd, u, v, _) = (U256::from(4u8)).extended_gcd(U256::from(10u8));
     assert_eq!(gcd, U256::from(2u8));
     assert_eq!(u, U256::from(3u8));
     assert!(bool::from(v.positive.ct_eq(&0.into())));
@@ -466,7 +425,7 @@ fn gcd() {
   }
 
   {
-    let (gcd, u, v) = U256::from(2u8).extended_gcd(U256::from(2u8));
+    let (gcd, u, v, _) = U256::from(2u8).extended_gcd(U256::from(2u8));
     assert_eq!(gcd, U256::from(2u8));
     assert_eq!(u, U256::ONE);
     assert!(bool::from(v.positive.ct_eq(&1.into())));
@@ -474,7 +433,7 @@ fn gcd() {
   }
 
   {
-    let (gcd, u, v) = (U256::from(10u8)).extended_gcd(U256::from(4u8));
+    let (gcd, u, v, _) = (U256::from(10u8)).extended_gcd(U256::from(4u8));
     assert_eq!(gcd, U256::from(2u8));
     assert_eq!(u, U256::from(1u8));
     assert!(bool::from(v.positive.ct_eq(&0.into())));
@@ -490,7 +449,7 @@ fn gcd() {
       "0000000000000000000000000000000000000000000000000000000000000000",
       "000000000000072B69C9DD0AA15F135675EA9C5180CF8FF0A59298CFC92E87FA"
     ));
-    let (gcd, u, v) = a.extended_gcd(b);
+    let (gcd, u, v, _) = a.extended_gcd(b);
     // u * a + v * b = g
     // v is either 0 or negative, so this is equivalent to
     // u * a - |v| * b = g

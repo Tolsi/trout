@@ -234,12 +234,13 @@ impl crate::Element for CryptoBigintStackElement {
         `a * u congruent to g mod c`. Scaling `a` by `u` accordingly produces `a * a**-1 * g`,
         which we convert to `a * a**-1` via integer division by `g`.
       */
-      let (g, u): (WideU, WideU) = congruence_3_lhs_factor.extended_gcd_part(mod_3);
+      let (g, u, mod_3_div_g): (WideU, WideU, WideU) =
+        congruence_3_lhs_factor.extended_gcd_part(mod_3);
       let wide_g = WideWideU::from((g, WideU::ZERO));
       let (res, rem): (WideWideU, WideWideU) =
         congruence_3_rhs.widening_mul(&u).div_rem(&NonZero::new(wide_g).unwrap());
       debug_assert!(bool::from(rem.is_zero()));
-      mod_3 = mod_3 / g;
+      mod_3 = mod_3_div_g;
 
       // Reduce res by the modulus
       let wide_mod_3 = WideWideU::from((mod_3, WideU::ZERO));
@@ -249,26 +250,16 @@ impl crate::Element for CryptoBigintStackElement {
     };
 
     // CRT generalized for coprime moduli
-    fn crt<
-      const LIMBS: usize,
-      const UNSAT_LIMBS: usize,
-      const TWICE_LIMBS: usize,
-      const THRICE_LIMBS: usize,
-    >(
+    fn crt<const LIMBS: usize, const TWICE_LIMBS: usize, const THRICE_LIMBS: usize>(
       congruence_1: Uint<LIMBS>,
       mod_1: Uint<LIMBS>,
       congruence_2: Uint<LIMBS>,
       mod_2: Uint<LIMBS>,
-    ) -> (Uint<TWICE_LIMBS>, Uint<TWICE_LIMBS>)
-    where
-      crypto_bigint_xgcd::Odd<Uint<LIMBS>>: crypto_bigint_xgcd::PrecomputeInverter<
-          Inverter = crypto_bigint_xgcd::modular::SafeGcdInverter<LIMBS, UNSAT_LIMBS>,
-        >,
-    {
-      let (g, u, v) = mod_1.extended_gcd(mod_2);
+    ) -> (Uint<TWICE_LIMBS>, Uint<TWICE_LIMBS>) {
+      let (g, u, v, mod_1_div_g) = mod_1.extended_gcd(mod_2);
       debug_assert!(bool::from((congruence_1 % g).ct_eq(&(congruence_2 % g))));
 
-      let M = mul_arbitrary_uints::<LIMBS, LIMBS, TWICE_LIMBS>(mod_1 / g, mod_2);
+      let M = mul_arbitrary_uints::<LIMBS, LIMBS, TWICE_LIMBS>(mod_1_div_g, mod_2);
       let x1: IStruct<Uint<{ THRICE_LIMBS }>> =
         IStruct::<Uint<TWICE_LIMBS>>::from(mul_arbitrary_uints(congruence_1, mod_2)).mul_i_uint(v);
       let x2 = mul_arbitrary_uints::<TWICE_LIMBS, LIMBS, THRICE_LIMBS>(
@@ -294,13 +285,11 @@ impl crate::Element for CryptoBigintStackElement {
 
     let (congruence_12, mod_12): (WideU, WideU) = crt::<
       { crypto_bigint_xgcd::nlimbs!(BITS / 2) },
-      { ((BITS / 2) + 64).div_ceil(62) as usize },
       { crypto_bigint_xgcd::nlimbs!(BITS) },
       { crypto_bigint_xgcd::nlimbs!(BITS + (BITS / 2)) },
     >(congruence_1, mod_1, congruence_2, mod_2);
     let (x, _mod_123): (WideWideU, WideWideU) = crt::<
       { crypto_bigint_xgcd::nlimbs!(BITS) },
-      { (BITS + 64).div_ceil(62) as usize },
       { crypto_bigint_xgcd::nlimbs!(2 * BITS) },
       { crypto_bigint_xgcd::nlimbs!(3 * BITS) },
     >(congruence_12, mod_12, congruence_3, mod_3);
@@ -352,12 +341,13 @@ impl crate::Element for CryptoBigintStackElement {
         `a * u congruent to g mod c`. Scaling `a` by `u` accordingly produces `a * a**-1 * g`,
         which we convert to `a * a**-1` via integer division by `g`.
       */
-      let (g, u): (WideU, WideU) = congruence_3_lhs_factor.extended_gcd_part(mod_3);
+      let (g, u, mod_3_div_g): (WideU, WideU, WideU) =
+        congruence_3_lhs_factor.extended_gcd_part(mod_3);
       let wide_g = WideWideU::from((g, WideU::ZERO));
       let (res, rem): (WideWideU, WideWideU) =
         congruence_3_rhs.widening_mul(&u).div_rem(&NonZero::new(wide_g).unwrap());
       debug_assert!(bool::from(rem.is_zero()));
-      mod_3 = mod_3 / g;
+      mod_3 = mod_3_div_g;
 
       // Reduce res by the modulus
       let wide_mod_3 = WideWideU::from((mod_3, WideU::ZERO));
@@ -370,7 +360,6 @@ impl crate::Element for CryptoBigintStackElement {
     fn crt<
       const LIMBS: usize,
       const TWICE_LIMBS: usize,
-      const UNSAT_LIMBS: usize,
       const THRICE_LIMBS: usize,
       const QUAD_LIMBS: usize,
       const FIVE_LIMBS: usize,
@@ -379,19 +368,14 @@ impl crate::Element for CryptoBigintStackElement {
       mod_1: Uint<LIMBS>,
       congruence_2: Uint<TWICE_LIMBS>,
       mod_2: Uint<TWICE_LIMBS>,
-    ) -> (Uint<THRICE_LIMBS>, Uint<QUAD_LIMBS>)
-    where
-      crypto_bigint_xgcd::Odd<Uint<TWICE_LIMBS>>: crypto_bigint_xgcd::PrecomputeInverter<
-          Inverter = crypto_bigint_xgcd::modular::SafeGcdInverter<TWICE_LIMBS, UNSAT_LIMBS>,
-        >,
-    {
+    ) -> (Uint<THRICE_LIMBS>, Uint<QUAD_LIMBS>) {
       let mut wide_mod_1 = Uint::<TWICE_LIMBS>::ZERO;
       let mod_1_words = mod_1.as_words();
       wide_mod_1.as_words_mut()[.. mod_1_words.len()].copy_from_slice(mod_1_words);
 
-      let (g, u, v) = wide_mod_1.extended_gcd(mod_2);
+      let (g, u, v, mod_1_div_g) = wide_mod_1.extended_gcd(mod_2);
 
-      let M = mul_arbitrary_uints::<TWICE_LIMBS, TWICE_LIMBS, QUAD_LIMBS>(wide_mod_1 / g, mod_2);
+      let M = mul_arbitrary_uints::<TWICE_LIMBS, TWICE_LIMBS, QUAD_LIMBS>(mod_1_div_g, mod_2);
       let x1: IStruct<Uint<{ FIVE_LIMBS }>> =
         IStruct::<Uint<THRICE_LIMBS>>::from(mul_arbitrary_uints(congruence_1, mod_2)).mul_i_uint(v);
       let x2 = mul_arbitrary_uints::<THRICE_LIMBS, TWICE_LIMBS, FIVE_LIMBS>(
@@ -421,7 +405,6 @@ impl crate::Element for CryptoBigintStackElement {
     let (x, _mod_123) = crt::<
       { crypto_bigint_xgcd::nlimbs!(BITS / 2) },
       { crypto_bigint_xgcd::nlimbs!(BITS) },
-      { (BITS + 64).div_ceil(62) as usize },
       { crypto_bigint_xgcd::nlimbs!(3 * (BITS / 2)) },
       { crypto_bigint_xgcd::nlimbs!(4 * (BITS / 2)) },
       { crypto_bigint_xgcd::nlimbs!(5 * (BITS / 2)) },
