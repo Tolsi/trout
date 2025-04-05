@@ -200,7 +200,7 @@ impl crate::Element for CryptoBigintStackElement {
     let B_mu: I = (self.b + other.b).half();
 
     let A1_A2_xgcd = self.a.extended_gcd(other.a);
-    let e: U = A1_A2_xgcd.0.bingcd(B_mu.abs());
+    let (e, _, A1_A2_xgcd_div_e) = B_mu.abs().extended_gcd_part(A1_A2_xgcd.0);
     let e = NonZero::new(e).unwrap();
     let A1_div_e: U = self.a / e;
     let A2_div_e: U = other.a / e;
@@ -215,7 +215,11 @@ impl crate::Element for CryptoBigintStackElement {
     let congruence_2 = other.b % mod_2;
     let e = e.get();
     let wide_e = WideU::from((e, U::ZERO));
-    let congruence_3 = {
+
+    // We drop the remainder here because `e` is explicitly a divisor of `B_mu`
+    let B_mu_div_e = (B_mu / e).0;
+
+    let (congruence_3, g_3) = {
       let congruence_3_rhs = {
         let congruence_3_rhs_numerator = self.discriminant + (self.b * other.b);
         let (congruence_3_rhs_mul_2, rem) = congruence_3_rhs_numerator / wide_e;
@@ -223,8 +227,7 @@ impl crate::Element for CryptoBigintStackElement {
         congruence_3_rhs_mul_2.half()
       } % mod_3;
 
-      // We drop the remainder here because `e` is explicitly a divisor of `B_mu`
-      let congruence_3_lhs_factor = (B_mu / e).0.widen::<WideU>();
+      let congruence_3_lhs_factor = B_mu_div_e.widen::<WideU>();
 
       /*
         We have `ax congruent to b mod c`.
@@ -262,7 +265,8 @@ impl crate::Element for CryptoBigintStackElement {
       let res = res % wide_mod_3;
       // Since this modulus only used the low bits, this only has low bits
       let res = res.split().0;
-      <_>::ct_select(&(mod_3 - res), &res, congruence_3_lhs_factor.positive())
+      let res = <_>::ct_select(&(mod_3 - res), &res, congruence_3_lhs_factor.positive());
+      (res, g)
     };
 
     // CRT generalized for coprime moduli
@@ -321,12 +325,15 @@ impl crate::Element for CryptoBigintStackElement {
     let wide_words_len = congruence_12.as_words().len();
     congruence_12.as_words_mut().copy_from_slice(&wide_congruence_12.as_words()[.. wide_words_len]);
 
-    let (x, _mod_123): (_, WideWideU) =
-      crt::<
-        { crypto_bigint_xgcd::nlimbs!(BITS) },
-        { crypto_bigint_xgcd::nlimbs!(2 * BITS) },
-        { crypto_bigint_xgcd::nlimbs!(3 * BITS) },
-      >(congruence_12, mod_12, congruence_3, mod_3, mod_12.extended_gcd(mod_3));
+    let (x, _mod_123): (_, WideWideU) = crt::<
+      { crypto_bigint_xgcd::nlimbs!(BITS) },
+      { crypto_bigint_xgcd::nlimbs!(2 * BITS) },
+      { crypto_bigint_xgcd::nlimbs!(3 * BITS) },
+    >(congruence_12, mod_12, congruence_3, mod_3, {
+      let xgcd = mod_12.extended_gcd(mod_3);
+      debug_assert_eq!(two_A / g_3 / Uint::from((A1_A2_xgcd_div_e, Uint::ZERO)), xgcd.0);
+      xgcd
+    });
 
     let mut wide_two_A = Uint::<{ crypto_bigint_xgcd::nlimbs!(3 * BITS) }>::ZERO;
     let two_A_words = two_A.as_words();
