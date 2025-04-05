@@ -199,8 +199,10 @@ impl crate::Element for CryptoBigintStackElement {
   fn add(&self, other: &Self) -> CryptoBigintStackElement {
     let B_mu: I = (self.b + other.b).half();
 
-    let A1_A2_xgcd = self.a.extended_gcd(other.a);
-    let (e, _, A1_A2_xgcd_div_e) = B_mu.abs().extended_gcd_part(A1_A2_xgcd.0);
+    // \gcd_1
+    let (g_1, u_1, v_1, _) = self.a.extended_gcd(other.a);
+    // \gcd_2
+    let (e, _, A1_A2_xgcd_div_e) = B_mu.abs().extended_gcd_part(g_1);
     let e = NonZero::new(e).unwrap();
     let A1_div_e: U = self.a / e;
     let A2_div_e: U = other.a / e;
@@ -238,20 +240,8 @@ impl crate::Element for CryptoBigintStackElement {
         `a * u congruent to g mod c`. Scaling `a` by `u` accordingly produces `a * a**-1 * g`,
         which we convert to `a * a**-1` via integer division by `g`.
       */
-      /*
-        This GCD calculates the product of the list of common prime factors of
-        `B_mu / e, 2 * A_1 * A_2 / e**2`. This can be paraphrased as:
-        ```
-        common_factors(
-          F_{B_mu} - common_factors(F_{B_mu}, F_{A_1}, F_{A_2}),
-          [2] +
-            F_{A_1} - common_factors(F_{B_mu}, F_{A_1}, F_{A_2}) +
-            F_{A_2} - common_factors(F_{B_mu}, F_{A_1}, F_{A_2})
-        )
-        ```
-        where `F_{...} = factors(...). This is equivalent to the statement
-        `product(common_factors(A, [2] + B + C)) / gcd(B_mu, A_1, A_2)`.
-      */
+
+      // \gcd_3
       let (g, u, mod_3_div_g): (WideU, WideU, WideU) =
         congruence_3_lhs_factor.abs().extended_gcd_part(mod_3);
       let wide_g = WideWideU::from((g, WideU::ZERO));
@@ -298,8 +288,8 @@ impl crate::Element for CryptoBigintStackElement {
       (x, M)
     }
 
-    let mod_1_mod_2_xgcd =
-      ((A1_A2_xgcd.0 / e) << 1, A1_A2_xgcd.1, A1_A2_xgcd.2, self.a / A1_A2_xgcd.0);
+    // \gcd_4
+    let mod_1_mod_2_xgcd = ((g_1 / e) << 1, u_1, v_1, self.a / g_1);
     #[cfg(debug_assertions)]
     {
       let actual = mod_1.extended_gcd(mod_2);
@@ -325,15 +315,16 @@ impl crate::Element for CryptoBigintStackElement {
     let wide_words_len = congruence_12.as_words().len();
     congruence_12.as_words_mut().copy_from_slice(&wide_congruence_12.as_words()[.. wide_words_len]);
 
+    let gcd_5 = {
+      let xgcd = mod_12.extended_gcd(mod_3);
+      debug_assert_eq!(two_A / g_3 / Uint::from((A1_A2_xgcd_div_e, Uint::ZERO)), xgcd.0);
+      xgcd
+    };
     let (x, _mod_123): (_, WideWideU) = crt::<
       { crypto_bigint_xgcd::nlimbs!(BITS) },
       { crypto_bigint_xgcd::nlimbs!(2 * BITS) },
       { crypto_bigint_xgcd::nlimbs!(3 * BITS) },
-    >(congruence_12, mod_12, congruence_3, mod_3, {
-      let xgcd = mod_12.extended_gcd(mod_3);
-      debug_assert_eq!(two_A / g_3 / Uint::from((A1_A2_xgcd_div_e, Uint::ZERO)), xgcd.0);
-      xgcd
-    });
+    >(congruence_12, mod_12, congruence_3, mod_3, gcd_5);
 
     let mut wide_two_A = Uint::<{ crypto_bigint_xgcd::nlimbs!(3 * BITS) }>::ZERO;
     let two_A_words = two_A.as_words();
