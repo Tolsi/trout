@@ -353,7 +353,10 @@ impl crate::Element for CryptoBigintStackElement {
   fn double(&self) -> CryptoBigintStackElement {
     let B_mu: I = self.b;
 
-    let (e, u_2, v_2, _) = B_mu.abs().extended_gcd(self.a);
+    // \gcd_1 when A_1 == A_2
+    let g_1 = self.a;
+    // \gcd_2
+    let (e, u_2, v_2, _) = B_mu.abs().extended_gcd(g_1);
     let e = NonZero::new(e).unwrap();
     let A_div_e: U = self.a / e;
     let A: WideU = A_div_e.widening_mul(&A_div_e);
@@ -389,74 +392,74 @@ impl crate::Element for CryptoBigintStackElement {
         which we convert to `a * a**-1` via integer division by `g`.
       */
 
-      // This calculates `g, u`, as in `u * B_mu_div_e + v * mod_3 = g`. It takes advantage of
-      // the structure of these statements to do so without an explicit call to the GCD
+      // \gcd_3
       let g_is_2 = B_mu_div_e.abs().is_even();
       let g = <_>::ct_select(&WideU::ONE, &WideU::from(2u8), g_is_2);
       let mod_3_div_g = <_>::ct_select(&mod_3, &(mod_3 >> 1u32), g_is_2);
 
-      // u_3' = y - yrp
-      let u_3_apo = IStruct::from(u_2).widen::<WideU>().widen::<WideWideU>() -
-        IStruct::from(
-          u_2.widening_mul(v_2.abs()).widening_mul(&Uint::from((A_div_e, Uint::ZERO))),
-        );
-      let u_3_apo = (u_3_apo % WideWideU::from((A, Uint::ZERO))).split().0;
+      let u = {
+        // u_3' = u_2 - u_2 |v_2| A_1/e
+        let u_3_apo = IStruct::from(u_2).widen::<WideU>().widen::<WideWideU>() -
+          IStruct::from(
+            u_2.widening_mul(v_2.abs()).widening_mul(&Uint::from((A_div_e, Uint::ZERO))),
+          );
+        let u_3_apo = (u_3_apo % WideWideU::from((A, Uint::ZERO))).split().0;
 
-      let u_3_target = <_>::ct_select(&(g % two_A), &Uint::ZERO, B_mu_div_e.abs().is_zero());
+        let u_3_target = <_>::ct_select(&(g % two_A), &Uint::ZERO, B_mu_div_e.abs().is_zero());
 
-      #[cfg(debug_assertions)]
-      {
-        // u_3_apo is the multiplicative inverse of B_\mu / e % A_1**2/e**2
-        debug_assert_eq!(
-          u_3_apo.widening_mul(&Uint::from((B_mu_div_e.into_abs(), Uint::ZERO))) %
-            Uint::from((A, Uint::ZERO)),
-          <_>::ct_select(
-            &(Uint::from(1u8) % Uint::from((A, Uint::ZERO))),
+        #[cfg(debug_assertions)]
+        {
+          // u_3_apo is the multiplicative inverse of B_\mu / e % A_1**2/e**2
+          debug_assert_eq!(
+            u_3_apo.widening_mul(&Uint::from((B_mu_div_e.into_abs(), Uint::ZERO))) %
+              Uint::from((A, Uint::ZERO)),
+            <_>::ct_select(
+              &(Uint::from(1u8) % Uint::from((A, Uint::ZERO))),
+              &Uint::ZERO,
+              B_mu_div_e.abs().is_zero()
+            )
+          );
+          // (u_3_apo << 1) * B_\mu / e % 2 * A_1**2/e**2 = 2
+          debug_assert_eq!(
+            (u_3_apo << 1u32).widening_mul(&Uint::from((B_mu_div_e.into_abs(), Uint::ZERO))) %
+              (Uint::from((two_A, Uint::ZERO))),
+            <_>::ct_select(
+              &(Uint::from(2u8) % (Uint::from((two_A, Uint::ZERO)))),
+              &Uint::ZERO,
+              B_mu_div_e.abs().is_zero()
+            )
+          );
+
+          let u_3_g_is_1_target = <_>::ct_select(
+            &(Uint::from(1u8) % (Uint::from((two_A, Uint::ZERO)))),
             &Uint::ZERO,
-            B_mu_div_e.abs().is_zero()
-          )
-        );
-        // (u_3_apo << 1) * B_\mu / e % 2 * A_1**2/e**2 = 2
-        debug_assert_eq!(
-          (u_3_apo << 1u32).widening_mul(&Uint::from((B_mu_div_e.into_abs(), Uint::ZERO))) %
-            (Uint::from((two_A, Uint::ZERO))),
-          <_>::ct_select(
-            &(Uint::from(2u8) % (Uint::from((two_A, Uint::ZERO)))),
-            &Uint::ZERO,
-            B_mu_div_e.abs().is_zero()
-          )
-        );
+            B_mu_div_e.abs().is_zero(),
+          );
 
-        let u_3_g1_target = <_>::ct_select(
-          &(Uint::from(1u8) % (Uint::from((two_A, Uint::ZERO)))),
-          &Uint::ZERO,
-          B_mu_div_e.abs().is_zero(),
-        );
+          // u_3_apo * B_\mu / e % 2 * A_1**2/e**2 \in {1, A_1**2/e**2 + 1}
+          let is_one = (u_3_apo.widening_mul(&Uint::from((B_mu_div_e.into_abs(), Uint::ZERO))) %
+            (Uint::from((two_A, Uint::ZERO))))
+          .ct_eq(&u_3_g_is_1_target);
+          let is_mod_plus_one = ((u_3_apo + A)
+            .widening_mul(&Uint::from((B_mu_div_e.into_abs(), Uint::ZERO))) %
+            (Uint::from((two_A, Uint::ZERO))))
+          .ct_eq(&u_3_g_is_1_target);
+          // In the case it's A_1**2/e**2 + 1, we only manage to clear it if B_\mu / e is odd
+          // It will be odd if g is 1, so it is well-defined, but we want to ensure this check
+          // passes (which it won't if `A_1**2/e**2 + 1` and B_\mu / e is even)
+          debug_assert!(bool::from(B_mu_div_e.abs().is_even() | is_one | is_mod_plus_one));
+        }
 
-        // u_3_apo * B_\mu / e % 2 * A_1**2/e**2 \in {1, A_1**2/e**2 + 1}
-        let is_one = (u_3_apo.widening_mul(&Uint::from((B_mu_div_e.into_abs(), Uint::ZERO))) %
+        let u_3 = <_>::ct_select(&u_3_apo, &(u_3_apo << 1u32), g_is_2);
+        let u_3_is_correct = (u_3.widening_mul(&Uint::from((B_mu_div_e.into_abs(), Uint::ZERO))) %
           (Uint::from((two_A, Uint::ZERO))))
-        .ct_eq(&u_3_g1_target);
-        let is_mod_plus_one = ((u_3_apo + A)
-          .widening_mul(&Uint::from((B_mu_div_e.into_abs(), Uint::ZERO))) %
-          (Uint::from((two_A, Uint::ZERO))))
-        .ct_eq(&u_3_g1_target);
-        // In the case it's A_1**2/e**2 + 1, we only manage to clear it if B_\mu / e is odd
-        debug_assert!(bool::from(B_mu_div_e.abs().is_even() | is_one | is_mod_plus_one));
-      }
+        .ct_eq(&Uint::from((u_3_target, Uint::ZERO)));
+        <_>::ct_select(&u_3, &(u_3 + A), !u_3_is_correct)
+      };
 
-      let u_3 = <_>::ct_select(&u_3_apo, &(u_3_apo << 1u32), g_is_2);
-      let u_3_is_correct = (u_3.widening_mul(&Uint::from((B_mu_div_e.into_abs(), Uint::ZERO))) %
-        (Uint::from((two_A, Uint::ZERO))))
-      .ct_eq(&Uint::from((u_3_target, Uint::ZERO)));
-      let u_3 = <_>::ct_select(&u_3, &(u_3 + A), !u_3_is_correct);
-      let u = u_3;
-
-      // TODO: We can remove this div g with a ct_select(x, x>>1, g_is_2)
-      let wide_g = WideWideU::from((g, WideU::ZERO));
-      let (res, rem): (WideWideU, WideWideU) =
-        congruence_3_rhs.widening_mul(&u).div_rem(&NonZero::new(wide_g).unwrap());
-      debug_assert!(bool::from(rem.is_zero()));
+      let res = congruence_3_rhs.widening_mul(&u);
+      // Divide by `g`
+      let res = <_>::ct_select(&res, &(res >> 1), g_is_2);
       mod_3 = mod_3_div_g;
 
       // Reduce res by the modulus
@@ -467,36 +470,11 @@ impl crate::Element for CryptoBigintStackElement {
       <_>::ct_select(&(mod_3 - res), &res, congruence_3_lhs_factor.positive())
     };
 
+    // \gcd_4 is omitted when A_1 == A_2
+
     let x = {
+      // \gcd_5 when A_1 == A_2
       let (g, u, v) = {
-        /*
-          a = 2 (A1 / e)
-          b = 2 (A2 / e)
-          c = (a * b) / 2
-
-          We want to calculate `gcd(lcm(a, b), c)`.
-
-          gcd(a * b / gcd(a, b), c)
-          gcd(a * b / gcd(2 AI / e, 2 A2 / e), c)
-          gcd(a * b / (2 gcd(AI / e, A2 / e)), c)
-          gcd(a * b / (2 gcd(AI / e, A2 / e)), a * b / 2)
-          gcd(a * b / 2 / gcd(AI / e, A2 / e), a * b / 2)
-
-          Please note how regardless of what the inner `gcd` yields, the second argument will be
-          divisible by the first argument. This lets us simplify the calculation of the outer
-          `gcd`.
-
-          The one complexity is in how `c` isn't `a * b / 2` yet
-          `a * b / 2 / gcd(B_mu / e, 2 A_1 * A_2 / e**2)`. `e = gcd(B_mu, A_1, A_2)` so `B_mu / e`
-          has no common factors with `A_1 * A_2 / e**2`. This is due to `e = gcd(B_mu, A_1, A_2)`.
-          If `A_1 != A_2`, then there may still be the common factors present in `B_mu, A_1` yet
-          not `A_2` (and vice versa), but `A_1 == A_2` when doubling. The only question is if
-          `B_mu / e` is divisible by `2`, bounding the `gcd` further divided by to being `1` or
-          `2`.
-
-          This means the second argument may not be divisible yet two times it will be, and still
-          lets us greatly accelerate calculation.
-        */
         let mod_1 = Uint::from((mod_1, Uint::ZERO));
         let divisible_by_mod_1 = (mod_3 % mod_1).is_zero();
         let mod_1_div_2 = mod_1 >> 1;
