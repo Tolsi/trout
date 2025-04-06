@@ -108,7 +108,8 @@ impl CryptoBigintStackElement {
 
     // https://eprint.iacr.org/2022/466
     {
-      let iterations = 2 + (log_2_a_bound - (discriminant.abs().bits().div_ceil(2) - 1));
+      let log_2_b_bound = log_2_a_bound + 1; // b % 2a upon composition
+      let iterations = log_2_b_bound;
       for _ in 0 .. iterations {
         // Step 2
         let (a_apo, b_apo, c_apo) = {
@@ -218,9 +219,15 @@ impl CryptoBigintStackElement {
     }
 
     // Algorithm 5.4.2 of A Course in Computational Algebraic Number Theory
+    // TODO: Replace this with the tail case of 2022-466. It's bounded to only occur once for each
+    // `m = 1`, `m = 0`, and prevents mixing bounds across algorithms
     {
-      // The prior algorithm causes B <= 2A, so this should only run a few times
-      let iterations = 4;
+      /*
+        The prior algorithm causes `b <= 2a`. When `b <= 2a`, a single reduction by `2a` (as the
+        following will do) will cause `-a < b <= a`. We run this twice to handle the edge-case
+        regarding `a < c` detailed in Lemma 5.4.4.
+      */
+      let iterations = 2;
 
       // We start our reduction by implementing step 1 and step 3
       let mut done = {
