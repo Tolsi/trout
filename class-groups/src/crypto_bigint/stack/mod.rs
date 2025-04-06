@@ -152,12 +152,42 @@ impl CryptoBigintStackElement {
 
         // Step 6
 
+        /*
+          `b**2 - 4ac = discriminant`
+
+          `b` starts as the bit-length of the discriminant, so `b**2` is twice the bit-length and
+          `a, c` is on average twice the bit-length yet each up to twice the bit-length of the
+          discriminant. Note `4ac` is within `1` of the bit-length of `b**2` when
+          `b**2 > |discriminant|`.
+
+          Because `b` decreases in size with each iteration (cite 2022-466), `4ac` must also
+          decreases in size (to remain within `1` of the bit-length of `b**2`). This is until
+          `b**2 <= |discriminant|`, at which point `4ac` is less than the bit-length of the
+          discriminant plus `1`.
+
+          Since we enforce `a < c` at the start of each iteration of the loop, we know the
+          bit-length of `a` must be less than or equal to half the bit-length of `c`.
+
+          `m` is unfortunately bounded to `log_2(b) - log_2(a)`, so that is the bit-length of the
+          discriminant minus potentially 0. We then need to perform the shifts `b << m` and
+          `a << m**2`. For the former, this means operating with `WideWideU`. For the latter, it is
+          again `WideWideU` as if `m` is high, `a` itself is low.
+        */
+
         // epsilon B == |B| since epsilon = sgn(B)
-        let epsilon_m_b = IStruct::from(b_apo.abs() << m);
-        let a_res = (IStruct::from(c_apo) - epsilon_m_b) + (a_apo << (2 * m));
+        let epsilon_m_b = IStruct::from(WideWideU::from((b_apo.into_abs(), Uint::ZERO)) << m);
+        let a_res = (IStruct::from(c_apo).widen::<WideWideU>() - epsilon_m_b) +
+          (WideWideU::from((a_apo, Uint::ZERO)) << (2 * m));
         debug_assert!(bool::from(a_res.positive()));
         let a_res = a_res.into_abs();
+        let a_res = a_res.split();
+        // Because `b` decreases, `a` decreases as extensively described above
+        // That means, because it was prior in bounds, this decreased version will be
+        // By the point `a` starts increasing in size again, it's capped within bounds
+        debug_assert_eq!(a_res.1, Uint::ZERO);
+        let a_res = a_res.0;
 
+        // This will have a bit-length approximate to B, which fits within a WideI, so this is fine
         let two_m_a = IStruct::from(a_apo << (1 + m));
         let epsilon_two_m_a = <_>::ct_select(&two_m_a, &-two_m_a, !b_apo.positive());
         let epsilon_two_m_a = <_>::ct_select(
@@ -170,10 +200,12 @@ impl CryptoBigintStackElement {
         let c_res = a_apo;
 
         // Only write these values if this was the `m = 2**k` case
-        let should_run = b_gt_2_a;
-        a = <_>::ct_select(&a, &a_res, should_run);
-        b = <_>::ct_select(&b, &-b_res, should_run);
-        c = <_>::ct_select(&c, &c_res, should_run);
+        let should_iterate = b_gt_2_a;
+        a = <_>::ct_select(&a, &a_res, should_iterate);
+        // The paper doesn't say to negate this here, but it was necessary when comparing the
+        // results to the textbook algorithm's
+        b = <_>::ct_select(&b, &-b_res, should_iterate);
+        c = <_>::ct_select(&c, &c_res, should_iterate);
       }
     }
 
