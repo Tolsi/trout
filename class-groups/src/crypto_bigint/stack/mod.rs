@@ -170,10 +170,22 @@ impl CryptoBigintStackElement {
           again `WideWideU` as if `m` is high, `a` itself is low.
         */
 
-        // epsilon B == |B| since epsilon = sgn(B)
-        let epsilon_m_b = IStruct::from(WideWideU::from((b_apo.into_abs(), Uint::ZERO)) << m);
-        let a_res = (IStruct::from(c_apo).widen::<WideWideU>() - epsilon_m_b) +
-          (WideWideU::from((a_apo, Uint::ZERO)) << (2 * m));
+        // This has bit-length approximate to `b`, so it fits within `WideU`
+        let m_a = a_apo << m;
+        // epsilon b == |b| since epsilon = sgn(b)
+        let epsilon_b = b_apo.into_abs();
+        // We calculate `- epsilon b + m a` instead of `- epsilon m b + m**2 a` so we can perform
+        // the subtraction over the smaller integers. Then we scale by `m` after
+        let m_a_minus_epsilon_b = IStruct::from(m_a) - IStruct::from(epsilon_b);
+        // Scale by `m`
+        let m_square_a_minus_epsilon_m_b_abs =
+          IStruct::from(WideWideU::from((m_a_minus_epsilon_b.into_abs(), Uint::ZERO)) << m);
+        let m_square_a_minus_epsilon_m_b = <_>::ct_select(
+          &-m_square_a_minus_epsilon_m_b_abs,
+          &m_square_a_minus_epsilon_m_b_abs,
+          m_a_minus_epsilon_b.positive(),
+        );
+        let a_res = IStruct::from(c_apo).widen::<WideWideU>() + m_square_a_minus_epsilon_m_b;
         debug_assert!(bool::from(a_res.positive()));
         let a_res = a_res.into_abs();
         let a_res = a_res.split();
