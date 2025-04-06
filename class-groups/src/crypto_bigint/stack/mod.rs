@@ -130,12 +130,8 @@ impl CryptoBigintStackElement {
         // Step 3
         let b_gt_2_a = b_apo.abs().ct_gt(&(a_apo.overflowing_shl_vartime(1).unwrap()));
         let m = {
-          // floor_log2(b) == (log2(b) - 1) + 1 if b == 2**k
           let b_bits = b_apo.abs().bits() - 1;
-          let b_bits =
-            <_>::ct_select(&b_bits, &(b_bits + 1), (Uint::ONE << b_bits).ct_eq(b_apo.abs()));
           let a_bits = a_apo.bits() - 1;
-          let a_bits = <_>::ct_select(&a_bits, &(a_bits + 1), (Uint::ONE << a_bits).ct_eq(&a_apo));
           // Bound these to ensure the following subtraction doesn't fail
           let b_bits = <_>::ct_select(&1, &b_bits, b_gt_2_a);
           let a_bits = <_>::ct_select(&0, &a_bits, b_gt_2_a);
