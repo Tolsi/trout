@@ -97,7 +97,7 @@ impl CryptoBigintStackElement {
       // Since `a` is positive, `c` also must be positive
       debug_assert!(bool::from(four_ac.positive()));
       let four_ac: WideWideU = four_ac.into_abs();
-      let ac: WideWideU = four_ac >> 2;
+      let ac: WideWideU = four_ac.overflowing_shr_vartime(2).unwrap();
       let (c, rem): (WideWideU, WideWideU) =
         ac.div_rem(&NonZero::new(WideWideU::from((a, WideU::ZERO))).unwrap());
       debug_assert!(bool::from(rem.ct_eq(&WideWideU::ZERO)));
@@ -128,7 +128,7 @@ impl CryptoBigintStackElement {
         };
 
         // Step 3
-        let b_gt_2_a = b_apo.abs().ct_gt(&(a_apo << 1));
+        let b_gt_2_a = b_apo.abs().ct_gt(&(a_apo.overflowing_shl_vartime(1).unwrap()));
         let m = {
           // floor_log2(b) == (log2(b) - 1) + 1 if b == 2**k
           let b_bits = b_apo.abs().bits() - 1;
@@ -139,13 +139,8 @@ impl CryptoBigintStackElement {
           // Bound these to ensure the following subtraction doesn't fail
           let b_bits = <_>::ct_select(&1, &b_bits, b_gt_2_a);
           let a_bits = <_>::ct_select(&0, &a_bits, b_gt_2_a);
-          // We store `m` as the amount of bits to shift by
-          let m = b_bits - a_bits - 1;
-          // We have 128 bits spare, and `C - epsilon m B + m**2 A`
-          // We set `m = 2**63` so `m**2 A` leaves us with 2 bits to spare (when we should only
-          // need 1, if any)
-          const MAX_M: u32 = 62;
-          <_>::ct_select(&m, &MAX_M, m.ct_gt(&MAX_M))
+          // We set `m` as the amount of bits to shift by
+          b_bits - a_bits - 1
         };
 
         /*
@@ -215,7 +210,7 @@ impl CryptoBigintStackElement {
       };
 
       for _ in 0 .. iterations {
-        let two_a: WideU = a << 1;
+        let two_a: WideU = a.overflowing_shl_vartime(1).unwrap();
         // b / 2a
         let (mut q, r): (WideI, WideU) = b / WideI::from(two_a);
         let r_gt_a = r.ct_gt(&a);
@@ -286,9 +281,9 @@ impl crate::Element for CryptoBigintStackElement {
     let A2_div_e: U = other.a / e;
     let A: WideU = A1_div_e.widening_mul(&A2_div_e);
 
-    let mod_1: U = A1_div_e << 1;
-    let mod_2: U = A2_div_e << 1;
-    let two_A: WideU = A << 1;
+    let mod_1: U = A1_div_e.overflowing_shl_vartime(1).unwrap();
+    let mod_2: U = A2_div_e.overflowing_shl_vartime(1).unwrap();
+    let two_A: WideU = A.overflowing_shl_vartime(1).unwrap();
     let mut mod_3 = two_A;
 
     let congruence_1 = self.b % mod_1;
@@ -367,7 +362,7 @@ impl crate::Element for CryptoBigintStackElement {
     }
 
     // \gcd_4
-    let mod_1_mod_2_xgcd = ((g_1 / e) << 1, u_1, v_1, self.a / g_1);
+    let mod_1_mod_2_xgcd = ((g_1 / e).overflowing_shl_vartime(1).unwrap(), u_1, v_1, self.a / g_1);
     #[cfg(debug_assertions)]
     {
       let actual = mod_1.extended_gcd(mod_2);
@@ -429,8 +424,8 @@ impl crate::Element for CryptoBigintStackElement {
     let A_div_e: U = self.a / e;
     let A: WideU = A_div_e.widening_mul(&A_div_e);
 
-    let mod_1: U = A_div_e << 1;
-    let two_A: WideU = A << 1;
+    let mod_1: U = A_div_e.overflowing_shl_vartime(1).unwrap();
+    let two_A: WideU = A.overflowing_shl_vartime(1).unwrap();
     let mut mod_3 = two_A;
 
     let congruence_1 = self.b % mod_1;
@@ -463,7 +458,8 @@ impl crate::Element for CryptoBigintStackElement {
       // \gcd_3
       let g_is_2 = B_mu_div_e.abs().is_even();
       let g = <_>::ct_select(&WideU::ONE, &WideU::from(2u8), g_is_2);
-      let mod_3_div_g = <_>::ct_select(&mod_3, &(mod_3 >> 1u32), g_is_2);
+      let mod_3_div_g =
+        <_>::ct_select(&mod_3, &(mod_3.overflowing_shr_vartime(1).unwrap()), g_is_2);
 
       let u = {
         // u_3' = u_2 - u_2 |v_2| A_1/e
@@ -489,7 +485,8 @@ impl crate::Element for CryptoBigintStackElement {
           );
           // (u_3_apo << 1) * B_\mu / e % 2 * A_1**2/e**2 = 2
           debug_assert_eq!(
-            (u_3_apo << 1u32).widening_mul(&Uint::from((B_mu_div_e.into_abs(), Uint::ZERO))) %
+            (u_3_apo.overflowing_shl_vartime(1).unwrap())
+              .widening_mul(&Uint::from((B_mu_div_e.into_abs(), Uint::ZERO))) %
               (Uint::from((two_A, Uint::ZERO))),
             <_>::ct_select(
               &(Uint::from(2u8) % (Uint::from((two_A, Uint::ZERO)))),
@@ -518,7 +515,7 @@ impl crate::Element for CryptoBigintStackElement {
           debug_assert!(bool::from(B_mu_div_e.abs().is_even() | is_one | is_mod_plus_one));
         }
 
-        let u_3 = <_>::ct_select(&u_3_apo, &(u_3_apo << 1u32), g_is_2);
+        let u_3 = <_>::ct_select(&u_3_apo, &(u_3_apo.overflowing_shl_vartime(1).unwrap()), g_is_2);
         let u_3_is_correct = (u_3.widening_mul(&Uint::from((B_mu_div_e.into_abs(), Uint::ZERO))) %
           (Uint::from((two_A, Uint::ZERO))))
         .ct_eq(&Uint::from((u_3_target, Uint::ZERO)));
@@ -527,7 +524,7 @@ impl crate::Element for CryptoBigintStackElement {
 
       let res = congruence_3_rhs.widening_mul(&u);
       // Divide by `g`
-      let res = <_>::ct_select(&res, &(res >> 1), g_is_2);
+      let res = <_>::ct_select(&res, &(res.overflowing_shr_vartime(1).unwrap()), g_is_2);
       mod_3 = mod_3_div_g;
 
       // Reduce res by the modulus
@@ -545,7 +542,7 @@ impl crate::Element for CryptoBigintStackElement {
       let (g, u, v) = {
         let mod_1 = Uint::from((mod_1, Uint::ZERO));
         let divisible_by_mod_1 = (mod_3 % mod_1).is_zero();
-        let mod_1_div_2 = mod_1 >> 1;
+        let mod_1_div_2 = mod_1.overflowing_shr_vartime(1).unwrap();
         // If not divisible by `mod_1`, then twice `mod_3` is, meaning divisble by half `mod_1`
         // Since `mod_1, mod_2` are even, `mod_1` will be and half `mod_1` is well-defined
         let g = <_>::ct_select(&mod_1, &mod_1_div_2, !divisible_by_mod_1);
