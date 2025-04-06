@@ -82,7 +82,6 @@ impl crypto_bigint_xgcd::ConstantTimeSelect for CryptoBigintStackElement {
 }
 
 impl CryptoBigintStackElement {
-  // Algorithm 5.4.2 of A Course in Computational Algebraic Number Theory
   fn reduce(log_2_a_bound: u32, mut a: WideU, mut b: WideI, discriminant: WideI) -> Self {
     let mut c: WideU = {
       // The `b` from composition is `% 2a`, so at most `b**2 = (2a-1)**2`. We increase this bound
@@ -107,72 +106,151 @@ impl CryptoBigintStackElement {
       lo
     };
 
-    // First, we establish the bound on the amount of iterations
-    let iterations = 2 + (log_2_a_bound - (discriminant.abs().bits().div_ceil(2) - 1));
+    // https://eprint.iacr.org/2022/466
+    {
+      let iterations = 2 + (log_2_a_bound - (discriminant.abs().bits().div_ceil(2) - 1));
+      for _ in 0 .. iterations {
+        // Step 2
+        let (a_apo, b_apo, c_apo) = {
+          let c_lt_a = c.ct_lt(&a);
+          let a_apo = <_>::ct_select(&a, &c, c_lt_a);
+          /*
+            This line differs from the paper, whose described algorithm has a pair of typos (as
+            further evidenced by the correctness proof transcribing line 6,
+            "[C - epsilon m B + m**2 A]" as "[C, - epsilon m B + A**2]").
 
-    // We start our reduction by implementing step 1 and step 3
-    let mut done = {
-      // If b is negative or zero, then we check `a > b.abs()`
-      let mut neg_a_less_than_b = ((!b.positive()) | b.abs().is_zero()) & a.ct_gt(b.abs());
-      // If b is positive and non-zero, `-a` will always be `< b` as `a` is in range `[0 ..]`
-      neg_a_less_than_b |= (!b.abs().is_zero()) & b.positive();
-      let b_less_than_or_equal_to_a = (!b.positive()) | b.abs().ct_lt(&a) | b.abs().ct_eq(&a);
+            This a modification necessary for the form reduced to be equivalent
+            `(a, b, c) -> (c, -b, a)`.
+          */
+          let b_apo = <_>::ct_select(&b, &-b, c_lt_a);
+          let c_apo = <_>::ct_select(&c, &a, c_lt_a);
+          (a_apo, b_apo, c_apo)
+        };
 
-      let jump_to_step_three = neg_a_less_than_b & b_less_than_or_equal_to_a;
+        // Step 3
+        let b_gt_2_a = b_apo.abs().ct_gt(&(a_apo << 1));
+        let m = {
+          // floor_log2(b) == (log2(b) - 1) + 1 if b == 2**k
+          let b_bits = b_apo.abs().bits() - 1;
+          let b_bits =
+            <_>::ct_select(&b_bits, &(b_bits + 1), (Uint::ONE << b_bits).ct_eq(b_apo.abs()));
+          let a_bits = a_apo.bits() - 1;
+          let a_bits = <_>::ct_select(&a_bits, &(a_bits + 1), (Uint::ONE << a_bits).ct_eq(&a_apo));
+          // Bound these to ensure the following subtraction doesn't fail
+          let b_bits = <_>::ct_select(&1, &b_bits, b_gt_2_a);
+          let a_bits = <_>::ct_select(&0, &a_bits, b_gt_2_a);
+          // We store `m` as the amount of bits to shift by
+          let m = b_bits - a_bits - 1;
+          // We have 128 bits spare, and `C - epsilon m B + m**2 A`
+          // We set `m = 2**63` so `m**2 A` leaves us with 2 bits to spare (when we should only
+          // need 1, if any)
+          const MAX_M: u32 = 62;
+          <_>::ct_select(&m, &MAX_M, m.ct_gt(&MAX_M))
+        };
 
-      // Continuation clause
-      let to_continue = a.ct_gt(&c);
-      // Only perform these writes if we jumped to step 3 and should continue
-      let prepare_for_next_step = jump_to_step_three & to_continue;
-      let neg_b = -b;
-      b = <_>::ct_select(&b, &neg_b, prepare_for_next_step);
-      let a_copy = a;
-      a = <_>::ct_select(&a, &c, prepare_for_next_step);
-      c = <_>::ct_select(&c, &a_copy, prepare_for_next_step);
+        /*
+          We don't implement steps 4, 5, as we only perform the binary reduction before moving to
+          the Euclidean algorithm for the final steps. If we did the conditional `m` here, we
+          wouldn't be able to optimize via its structure (due to needing to calculate both paths in
+          order to not reveal which was taken).
+        */
 
-      // Termination clause
-      let should_neg_b = a.ct_eq(&c) & (!b.positive());
-      b = <_>::ct_select(&b, &neg_b, jump_to_step_three & (!to_continue) & should_neg_b);
+        // Step 6
 
-      jump_to_step_three & (!to_continue)
-    };
+        // epsilon B == |B| since epsilon = sgn(B)
+        let epsilon_m_b = IStruct::from(b_apo.abs() << m);
+        let a_res = (IStruct::from(c_apo) - epsilon_m_b) + (a_apo << (2 * m));
+        debug_assert!(bool::from(a_res.positive()));
+        let a_res = a_res.into_abs();
 
-    for _ in 0 .. iterations {
-      let two_a: WideU = a << 1;
-      // b / 2a
-      let (mut q, r): (WideI, WideU) = b / WideI::from(two_a);
-      let r_gt_a = r.ct_gt(&a);
-      q = <_>::ct_select(&q, &(q + WideI::one()), r_gt_a);
-      let mut r = WideI::from(r);
-      r = <_>::ct_select(&r, &(r - WideI::from(two_a)), r_gt_a);
+        let two_m_a = IStruct::from(a_apo << (1 + m));
+        let epsilon_two_m_a = <_>::ct_select(&two_m_a, &-two_m_a, !b_apo.positive());
+        let epsilon_two_m_a = <_>::ct_select(
+          &epsilon_two_m_a,
+          &IStruct::from(Uint::ZERO),
+          b_apo.abs().ct_eq(&Uint::ZERO),
+        );
+        let b_res = b_apo - epsilon_two_m_a;
 
-      // Write the reduced `(c, b)` if we aren't already done
-      let b_r = (b + r).half();
-      let next_c = WideI::from(c).widen::<WideWideU>() - (b_r * q);
-      debug_assert!(bool::from(next_c.positive()));
-      // This is safe as for unreduced `a`, `c <= a / 2`
-      let (next_c_lo, next_c_hi) = next_c.into_abs().split();
-      debug_assert!(bool::from(done | next_c_hi.is_zero()));
-      c = <_>::ct_select(&c, &next_c_lo, !done);
-      b = <_>::ct_select(&b, &r, !done);
+        let c_res = a_apo;
 
-      // Step 3
-
-      // Continuation clause
-      let to_continue = a.ct_gt(&c);
-      let prepare_for_next_step = !done & to_continue;
-      let neg_b = -b;
-      b = <_>::ct_select(&b, &neg_b, prepare_for_next_step);
-      let a_copy = a;
-      a = <_>::ct_select(&a, &c, prepare_for_next_step);
-      c = <_>::ct_select(&c, &a_copy, prepare_for_next_step);
-
-      // Termination clause
-      done = !prepare_for_next_step;
-      let should_neg_b = a.ct_eq(&c) & (!b.positive());
-      b = <_>::ct_select(&b, &neg_b, done & should_neg_b);
+        // Only write these values if this was the `m = 2**k` case
+        let should_run = b_gt_2_a;
+        a = <_>::ct_select(&a, &a_res, should_run);
+        b = <_>::ct_select(&b, &-b_res, should_run);
+        c = <_>::ct_select(&c, &c_res, should_run);
+      }
     }
-    debug_assert!(bool::from(done));
+
+    // Algorithm 5.4.2 of A Course in Computational Algebraic Number Theory
+    {
+      // The prior algorithm causes B <= 2A, so this should only run a few times
+      let iterations = 4;
+
+      // We start our reduction by implementing step 1 and step 3
+      let mut done = {
+        // If b is negative or zero, then we check `a > b.abs()`
+        let mut neg_a_less_than_b = ((!b.positive()) | b.abs().is_zero()) & a.ct_gt(b.abs());
+        // If b is positive and non-zero, `-a` will always be `< b` as `a` is in range `[0 ..]`
+        neg_a_less_than_b |= (!b.abs().is_zero()) & b.positive();
+        let b_less_than_or_equal_to_a = (!b.positive()) | b.abs().ct_lt(&a) | b.abs().ct_eq(&a);
+
+        let jump_to_step_three = neg_a_less_than_b & b_less_than_or_equal_to_a;
+
+        // Continuation clause
+        let to_continue = a.ct_gt(&c);
+        // Only perform these writes if we jumped to step 3 and should continue
+        let prepare_for_next_step = jump_to_step_three & to_continue;
+        let neg_b = -b;
+        b = <_>::ct_select(&b, &neg_b, prepare_for_next_step);
+        let a_copy = a;
+        a = <_>::ct_select(&a, &c, prepare_for_next_step);
+        c = <_>::ct_select(&c, &a_copy, prepare_for_next_step);
+
+        // Termination clause
+        let should_neg_b = a.ct_eq(&c) & (!b.positive());
+        b = <_>::ct_select(&b, &neg_b, jump_to_step_three & (!to_continue) & should_neg_b);
+
+        jump_to_step_three & (!to_continue)
+      };
+
+      for _ in 0 .. iterations {
+        let two_a: WideU = a << 1;
+        // b / 2a
+        let (mut q, r): (WideI, WideU) = b / WideI::from(two_a);
+        let r_gt_a = r.ct_gt(&a);
+        q = <_>::ct_select(&q, &(q + WideI::one()), r_gt_a);
+        let mut r = WideI::from(r);
+        r = <_>::ct_select(&r, &(r - WideI::from(two_a)), r_gt_a);
+
+        // Write the reduced `(c, b)` if we aren't already done
+        let b_r = (b + r).half();
+        let next_c = WideI::from(c).widen::<WideWideU>() - (b_r * q);
+        debug_assert!(bool::from(next_c.positive()));
+        // This is safe as for unreduced `a`, `c <= a / 2`
+        let (next_c_lo, next_c_hi) = next_c.into_abs().split();
+        debug_assert!(bool::from(done | next_c_hi.is_zero()));
+        c = <_>::ct_select(&c, &next_c_lo, !done);
+        b = <_>::ct_select(&b, &r, !done);
+
+        // Step 3
+
+        // Continuation clause
+        let to_continue = a.ct_gt(&c);
+        let prepare_for_next_step = !done & to_continue;
+        let neg_b = -b;
+        b = <_>::ct_select(&b, &neg_b, prepare_for_next_step);
+        let a_copy = a;
+        a = <_>::ct_select(&a, &c, prepare_for_next_step);
+        c = <_>::ct_select(&c, &a_copy, prepare_for_next_step);
+
+        // Termination clause
+        done = !prepare_for_next_step;
+        let should_neg_b = a.ct_eq(&c) & (!b.positive());
+        b = <_>::ct_select(&b, &neg_b, done & should_neg_b);
+      }
+      debug_assert!(bool::from(done));
+    }
 
     let (a_lo, a_hi): (U, U) = a.split();
     debug_assert!(bool::from(a_hi.is_zero()));
@@ -340,7 +418,6 @@ impl crate::Element for CryptoBigintStackElement {
     Self::reduce(log_2_a_bound, A, WideI::from(B), self.discriminant)
   }
 
-  // A copy/paste of `Self::add` which removes the duplicated congruence for this specialization
   fn double(&self) -> CryptoBigintStackElement {
     let B_mu: I = self.b;
 
