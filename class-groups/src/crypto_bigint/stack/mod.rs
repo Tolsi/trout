@@ -322,7 +322,7 @@ impl crate::Element for CryptoBigintStackElement {
     // \gcd_1
     let (g_1, u_1, v_1, _) = self.a.extended_gcd(other.a);
     // \gcd_2
-    let (e, _v_2, _u_2, _A1_A2_xgcd_div_e) = g_1.extended_gcd(B_mu.into_abs());
+    let (e, _v_2, _u_2, A1_A2_xgcd_div_e) = g_1.extended_gcd(B_mu.into_abs());
     let e = NonZero::new(e).unwrap();
     let A1_div_e: U = self.a / e;
     let A2_div_e: U = other.a / e;
