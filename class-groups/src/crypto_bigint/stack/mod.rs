@@ -322,7 +322,7 @@ impl crate::Element for CryptoBigintStackElement {
     // \gcd_1
     let (g_1, u_1, v_1, _) = self.a.extended_gcd(other.a);
     // \gcd_2
-    let (e, _, A1_A2_xgcd_div_e) = B_mu.abs().extended_gcd_part(g_1);
+    let (e, _v_2, _u_2, _A1_A2_xgcd_div_e) = g_1.extended_gcd(B_mu.into_abs());
     let e = NonZero::new(e).unwrap();
     let A1_div_e: U = self.a / e;
     let A2_div_e: U = other.a / e;
@@ -435,6 +435,79 @@ impl crate::Element for CryptoBigintStackElement {
     let wide_words_len = congruence_12.as_words().len();
     congruence_12.as_words_mut().copy_from_slice(&wide_congruence_12.as_words()[.. wide_words_len]);
 
+    /*
+    let gcd_5 = {
+      let g_5 = two_A / g_3 / Uint::from((A1_A2_xgcd_div_e, Uint::ZERO));
+      let a_apo = IStruct::from(v_2);
+      let b_denom = Uint::from((B_mu.into_abs(), Uint::ZERO)).div_rem(&NonZero::new(g_3).unwrap());
+      debug_assert_eq!(b_denom.1, Uint::ZERO);
+      // This is safe to split as the numerator was only of size U, so this WideU is a U
+      let b_denom = b_denom.0.split();
+      debug_assert_eq!(b_denom.1, Uint::ZERO);
+      let b_denom = b_denom.0;
+
+      let b = u_2 * b_denom;
+      let gcd_g1_g3 = (a_apo * g_1).widen::<WideWideU>() + (b * g_3);
+      debug_assert!(bool::from(gcd_g1_g3.positive()));
+      let gcd_g1_g3 = gcd_g1_g3
+        .into_abs()
+        .div_rem(&NonZero::new(Uint::from((Uint::from((e, Uint::ZERO)), Uint::ZERO))).unwrap());
+      debug_assert_eq!(gcd_g1_g3.1, Uint::ZERO);
+      let gcd_g1_g3 = gcd_g1_g3.0;
+      let _g_1: U = g_1;
+      let _g_3: WideU = g_3;
+      // Reduce from WideWideU to U since this is the GCD of a (U, WideU)
+      // This is only true if the U is non-zero, which it is as the output of a GCD
+      let gcd_g1_g3 = gcd_g1_g3.split().0.split().0;
+
+      // TODO: We need to calculate this without a call to `bingcd` somehow
+      let gcd_e_g3 = Uint::from((e, Uint::ZERO)).bingcd(&g_3).split().0;
+      let gcd_g1_g3 = gcd_g1_g3.widening_mul(&gcd_e_g3);
+      debug_assert_eq!(Uint::from((g_1 / e, Uint::ZERO)).extended_gcd(g_3).0, Uint::ONE);
+      debug_assert_eq!(Uint::from((g_1, Uint::ZERO)).extended_gcd(g_3).0, gcd_g1_g3);
+
+      let a_apo_apo = a_apo;
+      let b_apo_apo = b / Uint::from((e, Uint::ZERO));
+      debug_assert_eq!(b_apo_apo.1, Uint::ZERO);
+      let b_apo_apo = b_apo_apo.0;
+      debug_assert!(bool::from(
+        ((a_apo_apo * (g_1 / e)).widen::<WideWideU>() + (b_apo_apo * IStruct::from(g_3)))
+          .ct_eq(&IStruct::from(gcd_g1_g3).widen::<WideWideU>())
+      ));
+
+      let u_5 = b_apo_apo % ((two_A / g_3) / g_5);
+
+      let x = Uint::from((g_1 / e, Uint::ZERO));
+      let v_5_mod = (two_A / x) / g_5;
+      let v_5 = a_apo_apo.widen::<WideU>() % v_5_mod;
+      // We need to negate v_5 if u_5 is non-zero
+      let v_5 = <_>::ct_select(
+        &IStruct::from(v_5),
+        &-IStruct::from(v_5_mod - v_5),
+        !u_5.ct_eq(&Uint::ZERO),
+      );
+      let v_5 =
+        <_>::ct_select(&v_5, &IStruct::from(Uint::ZERO), v_5.ct_eq(&-IStruct::from(v_5_mod)));
+
+      // Finally, if d / x == d / y, we normalize to (1, 0)
+      let x_eq_y = x.ct_eq(&g_3);
+      let u_5 = <_>::ct_select(&u_5, &Uint::ONE, x_eq_y);
+      let v_5 = <_>::ct_select(&v_5, &IStruct::from(Uint::ZERO), x_eq_y);
+
+      let res = (g_5, u_5, v_5, v_5_mod);
+
+      #[cfg(debug_assertions)]
+      {
+        let xgcd = mod_12.extended_gcd(mod_3);
+        debug_assert_eq!(res.0, xgcd.0);
+        debug_assert_eq!(res.1, xgcd.1);
+        debug_assert!(bool::from(res.2.ct_eq(&xgcd.2)));
+        debug_assert_eq!(res.3, xgcd.3);
+      }
+
+      res
+    };
+    */
     let gcd_5 = {
       let xgcd = mod_12.extended_gcd(mod_3);
       debug_assert_eq!(two_A / g_3 / Uint::from((A1_A2_xgcd_div_e, Uint::ZERO)), xgcd.0);
