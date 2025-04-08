@@ -101,9 +101,9 @@ pub trait Parameters<CG: Element>: Sized {
 
 /// ECDSA over secp256k1.
 #[cfg(feature = "secp256k1")]
-pub struct Secp256k1<CG: Element, P: Primes>(PhantomData<(CG, P)>);
+pub struct Secp256k1<P: Primes>(PhantomData<P>);
 #[cfg(feature = "secp256k1")]
-impl<CG: Element, P: Primes> Parameters<CG> for Secp256k1<CG, P> {
+impl<CG: Element, P: Primes> Parameters<CG> for Secp256k1<P> {
   type E = k256::ProjectivePoint;
   type F = k256::Scalar;
 

@@ -871,18 +871,21 @@ impl<
 #[test]
 fn test_ddh_evrf() {
   type EvrfInstantiated = DdhEvrf<ciphersuite::Secp256k1, secq256k1::Point>;
-  type Parameters = crate::Secp256k1<class_groups::MalachiteElement, crate::CryptoPrimesStackCcykc>;
+  type Parameters = crate::Secp256k1<crate::CryptoPrimesStackCcykc>;
+  type Element = class_groups::CryptoBigintStackElement;
 
-  let global_setup = <EvrfInstantiated as Evrf<_, Parameters>>::global_setup();
+  let global_setup = <EvrfInstantiated as Evrf<Element, Parameters>>::global_setup();
 
   let (setup_view, setup) =
-    <EvrfInstantiated as Evrf<_, Parameters>>::setup(&global_setup, &mut rand_core::OsRng);
+    <EvrfInstantiated as Evrf<Element, Parameters>>::setup(&global_setup, &mut rand_core::OsRng);
 
-  let context =
-    <EvrfInstantiated as Evrf<_, Parameters>>::context(&global_setup, &mut blake3::Hasher::new());
+  let context = <EvrfInstantiated as Evrf<Element, Parameters>>::context(
+    &global_setup,
+    &mut blake3::Hasher::new(),
+  );
 
   let mut transcript = DigestWriter(blake3::Hasher::new(), vec![]);
-  let nonce = <EvrfInstantiated as Evrf<_, Parameters>>::prove(
+  let nonce = <EvrfInstantiated as Evrf<Element, Parameters>>::prove(
     &mut rand_core::OsRng,
     &global_setup,
     &setup,
@@ -891,9 +894,10 @@ fn test_ddh_evrf() {
   )
   .unwrap();
 
-  let mut batch_verifier = <EvrfInstantiated as Evrf<_, Parameters>>::batch_verifier(&global_setup);
+  let mut batch_verifier =
+    <EvrfInstantiated as Evrf<Element, Parameters>>::batch_verifier(&global_setup);
   let mut transcript = DigestReader(blake3::Hasher::new(), transcript.1.as_slice());
-  let nonce_commitment = <EvrfInstantiated as Evrf<_, Parameters>>::queue_verification(
+  let nonce_commitment = <EvrfInstantiated as Evrf<Element, Parameters>>::queue_verification(
     &mut rand_core::OsRng,
     &global_setup,
     &mut batch_verifier,
@@ -904,5 +908,5 @@ fn test_ddh_evrf() {
   )
   .unwrap();
   assert_eq!(k256::ProjectivePoint::GENERATOR * *nonce, nonce_commitment);
-  <EvrfInstantiated as Evrf<_, Parameters>>::verify(&global_setup, batch_verifier).unwrap();
+  <EvrfInstantiated as Evrf<Element, Parameters>>::verify(&global_setup, batch_verifier).unwrap();
 }

@@ -382,6 +382,21 @@ impl<E: Element> ClassGroup<E> {
     element::<E>(a, b, &self.delta_p, &self.tess_root_p)
       .ok_or_else(|| io::Error::other("element didn't have a `c`"))
   }
+
+  /// Map an element of the class group with discriminant `p` with a distinct type into this
+  /// element type.
+  ///
+  /// This function executes in variable time.
+  pub fn map_p<E2: Element>(&self, e: &E2) -> E {
+    let (b_positive, b) = e.b();
+    let mut b = Integer::from(natural_from_bytes(&b));
+    if !bool::from(b_positive) {
+      b = -b;
+    }
+    // `unwrap` is fine as this is either valid or of a different discriminant, which means we're
+    // allowed to have undefined behavior
+    element::<E>(natural_from_bytes(&e.a()), b, &self.delta_p, &self.tess_root_p).unwrap()
+  }
 }
 
 #[cfg(test)]

@@ -4,6 +4,7 @@ use two_round_ecdsa::{SecurityLevel, Setup, SigningProtocol, Ready};
 
 #[test]
 fn sign() {
+  type ProverElement = class_groups::CryptoBigintStackElement;
   #[cfg(not(feature = "gmp"))]
   type Element = class_groups::MalachiteElement;
   #[cfg(not(feature = "gmp"))]
@@ -13,7 +14,7 @@ fn sign() {
   #[cfg(feature = "gmp")]
   type Primes = two_round_ecdsa::proofs::GmpPrimes;
 
-  let mut setups = Setup::<Element, two_round_ecdsa::Secp256k1<_, Primes>>::dealer(
+  let mut setups = Setup::<ProverElement, Element, two_round_ecdsa::Secp256k1<Primes>>::dealer(
     &mut OsRng,
     SecurityLevel::Insecure,
     2,
@@ -28,11 +29,11 @@ fn sign() {
   let second = setups.remove(&second_i).unwrap();
 
   let (first, first_message) =
-    SigningProtocol::<_, two_round_ecdsa::Secp256k1<_, Primes>>::participate(
+    SigningProtocol::<_, _, two_round_ecdsa::Secp256k1<Primes>>::participate(
       &mut OsRng, first, [0; 32],
     );
   let (second, second_message) =
-    SigningProtocol::<_, two_round_ecdsa::Secp256k1<_, Primes>>::participate(
+    SigningProtocol::<_, _, two_round_ecdsa::Secp256k1<Primes>>::participate(
       &mut OsRng, second, [0; 32],
     );
   println!("Participated!");
