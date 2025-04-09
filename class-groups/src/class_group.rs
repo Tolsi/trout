@@ -331,7 +331,7 @@ impl<E: Element> ClassGroup<E> {
       (s_ * inv_t_) % &a_
     };
     // Step 8-10
-    let f = compression::f(&a_, g.clone());
+    let f = compression::f(&a, &a_, g.clone());
     if b_0 >= f {
       Err(io::Error::other("non-canonical b_0"))?
     }

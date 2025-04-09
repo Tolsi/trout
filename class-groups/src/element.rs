@@ -188,7 +188,7 @@ pub trait Element:
       // t may be negative so this is an integer
       let t_ = t / Integer::from(g.clone());
       // `g`, `a`, `a_` are positive so `f` is unsigned
-      let f = compression::f(&a_, g.clone());
+      let f = compression::f(&a, &a_, g.clone());
       assert_eq!(&s % &g, Natural::ZERO);
       // `b` is in its absolute value form and `f` is positive, so `b_0` is unsigned
       let b_0 = b % &f;

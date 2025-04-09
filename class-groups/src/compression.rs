@@ -10,17 +10,13 @@ use crate::malachite::{natural_from_bytes, natural_to_bytes};
 
 /// Calculate the `f` used when compressing/decompressing.
 ///
-/// Assumes `g`, `a_` are non-zero.
-/*
-  This is modified from the paper. The explicit intent of `f` is to allow `a', g` to share common
-  factors. The issue is the provided algorithm still had `a', f` share common factors (which this
-  algorithm avoids).
-*/
-pub(crate) fn f(a_: &Natural, g: Natural) -> Natural {
+/// Assumes `g`, `a_` are non-zero, `a >= a'`.
+pub(crate) fn f(a: &Natural, a_: &Natural, g: Natural) -> Natural {
   let mut f = g;
   while {
     let (gcd, _x, _y) = f.clone().extended_gcd(a_);
-    gcd != Natural::ONE
+    let lcm = (&f * a_) / gcd;
+    lcm < *a
   } {
     f += Natural::ONE;
   }
@@ -64,23 +60,16 @@ pub(crate) fn partial_xgcd(a: Natural, b: Natural) -> (Natural, Integer) {
 ///
 /// The moduli are assumed to be non-zero.
 pub(crate) fn crt(a1: Natural, n1: Natural, a2: Natural, n2: Natural) -> io::Result<Natural> {
-  if n1 == Natural::ONE {
-    return Ok(a2);
+  let (g, u, v) = (&n1).extended_gcd(&n2);
+  if (&a1 % &g) != (&a2 % &g) {
+    Err(io::Error::other("CRT has no solution"))?;
   }
-  if n2 == Natural::ONE {
-    return Ok(a1);
-  }
+  let M = (&n1 / &g) * &n2;
+  let x = ((Integer::from(&a1 * &n2) * &v) + (Integer::from(&a2 * &n1) * &u)) / Integer::from(g);
 
-  let modulus = &n1 * &n2;
-
-  let z1 = (&n2 % &n1).mod_inverse(&n1).ok_or_else(|| {
-    io::Error::other(format!("n2 ({n2}) didn't have an inverse modulo n1 ({n1})"))
-  })?;
-  let z2 = (&n1 % &n2)
-    .mod_inverse(&n2)
-    .ok_or_else(|| io::Error::other("n1 didn't have an inverse modulo n2"))?;
-
-  Ok(((a1 * n2 * z1) + (a2 * n1 * z2)) % modulus)
+  let x_sign = x.sign();
+  let x = x.unsigned_abs() % &M;
+  Ok(if x_sign == Ordering::Less { &M - x } else { x })
 }
 
 /// Write a value, encoded as a VarInt, LE-chunked with the MSB first within a chunk.
