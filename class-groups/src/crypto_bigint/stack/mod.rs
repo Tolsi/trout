@@ -197,7 +197,7 @@ impl CryptoBigintStackElement {
         let a_res = a_res.0;
 
         // This will have a bit-length approximate to B, which fits within a WideI, so this is fine
-        let two_m_a = IStruct::from(a_apo << (1 + m));
+        let two_m_a = IStruct::from(m_a.overflowing_shl_vartime(1).unwrap());
         let epsilon_two_m_a = <_>::ct_select(&two_m_a, &-two_m_a, !b_apo.positive());
         let epsilon_two_m_a = <_>::ct_select(
           &epsilon_two_m_a,
