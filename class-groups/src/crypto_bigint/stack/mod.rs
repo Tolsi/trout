@@ -529,7 +529,7 @@ impl crate::Element for CryptoBigintStackElement {
 
     // Since `A = (A_1 / e) * (A_2 / e)`, where `e = gcd(A_1, A_2, B_mu)`, we assume `e = 1` and
     // the bound on `log_2(A)` becomes `log_2(A_1 * A_2)`
-    let log_2_a_bound = 2 * self.discriminant.abs().bits().div_ceil(2);
+    let log_2_a_bound = 2 * self.discriminant.abs().bits_vartime().div_ceil(2);
     Self::reduce(log_2_a_bound, A, WideI::from(B), self.discriminant)
   }
 
@@ -728,7 +728,7 @@ impl crate::Element for CryptoBigintStackElement {
 
     // Since `A = (A_1 / e) * (A_2 / e)`, where `e = gcd(A_1, A_2, B_mu)`, we assume `e = 1` and
     // the bound on `log_2(A)` becomes `log_2(A_1 * A_2)`
-    let log_2_a_bound = 2 * self.discriminant.abs().bits().div_ceil(2);
+    let log_2_a_bound = 2 * self.discriminant.abs().bits_vartime().div_ceil(2);
     Self::reduce(log_2_a_bound, A, WideI::from(B), self.discriminant)
   }
 
@@ -852,7 +852,7 @@ impl Neg for CryptoBigintStackElement {
   type Output = Self;
   fn neg(self) -> Self {
     Self::reduce(
-      self.discriminant.abs().bits().div_ceil(2),
+      self.discriminant.abs().bits_vartime().div_ceil(2),
       (&self.a).into(),
       (-self.b).widen(),
       self.discriminant,
