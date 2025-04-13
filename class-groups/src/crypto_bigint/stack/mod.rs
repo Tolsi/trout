@@ -321,7 +321,7 @@ impl CryptoBigintStackElement {
 }
 
 impl crate::Element for CryptoBigintStackElement {
-  const MAX_TABLE_BITS: u32 = 8;
+  const MAX_TABLE_BITS: u32 = 12;
 
   fn is_identity(&self) -> subtle::Choice {
     self.a.ct_eq(&U::ONE) & self.b.ct_eq(&I::one())
