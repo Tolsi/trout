@@ -178,27 +178,39 @@ impl CryptoBigintStackElement {
         // We calculate `- epsilon b + m a` instead of `- epsilon m b + m**2 a` so we can perform
         // the subtraction over the smaller integers. Then we scale by `m` after
         let m_a_minus_epsilon_b = IStruct::from(m_a) - IStruct::from(epsilon_b);
+
         // Scale by `m`
-        let m_square_a_minus_epsilon_m_b_abs =
-          IStruct::from(WideWideU::from((m_a_minus_epsilon_b.into_abs(), Uint::ZERO)) << m);
+        /*
+          We now need to calculate `a_{i+1} = c_i - epsilon m b_i + m**2 a_i`.
+
+          Because `b` decreases, `a` decreases, as extensively described above. That means, because
+          it was prior in bounds, this decreased version will be. By the point `a` starts
+          increasing in size again, it's capped within bounds.
+
+          This also means that we have either `x + |m y|`, or `x - |m y|` where `x, y` and the
+          result fit within a Wide*. For the first case, where `m y` is positive and added, `m y`
+          must have bit-length less than or equal to the result. For the second case, where `m y`
+          is negative and subtracted, it is at most of bit-length `x` since the result is
+          guaranteed to be positive.
+
+          Accordingly, `m y` fits within either the bounds of the result or the bounds of `x`.
+          Since both fit within a `Wide*`, `m y` does and we don't need to promote it to
+          `WideWideU`.
+        */
+        let m_square_a_minus_epsilon_m_b_abs = IStruct::from(m_a_minus_epsilon_b.into_abs() << m);
         let m_square_a_minus_epsilon_m_b = <_>::ct_select(
           &-m_square_a_minus_epsilon_m_b_abs,
           &m_square_a_minus_epsilon_m_b_abs,
           m_a_minus_epsilon_b.positive(),
         );
-        let a_res = IStruct::from(c_apo).widen::<WideWideU>() + m_square_a_minus_epsilon_m_b;
+
+        let a_res = IStruct::from(c_apo) + m_square_a_minus_epsilon_m_b;
         debug_assert!(bool::from(a_res.positive()));
         let a_res = a_res.into_abs();
-        let a_res = a_res.split();
-        // Because `b` decreases, `a` decreases as extensively described above
-        // That means, because it was prior in bounds, this decreased version will be
-        // By the point `a` starts increasing in size again, it's capped within bounds
-        debug_assert_eq!(a_res.1, Uint::ZERO);
-        let a_res = a_res.0;
 
         // This will have a bit-length approximate to B, which fits within a WideI, so this is fine
         let two_m_a = IStruct::from(m_a.overflowing_shl_vartime(1).unwrap());
-        let epsilon_two_m_a = <_>::ct_select(&two_m_a, &-two_m_a, !b_apo.positive());
+        let epsilon_two_m_a = <_>::ct_select(&-two_m_a, &two_m_a, b_apo.positive());
         let epsilon_two_m_a = <_>::ct_select(
           &epsilon_two_m_a,
           &IStruct::from(Uint::ZERO),
