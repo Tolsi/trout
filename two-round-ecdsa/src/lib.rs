@@ -127,3 +127,26 @@ impl<CG: Element, P: Primes> Parameters<CG> for Secp256k1<P> {
     <k256::Scalar as Reduce<k256::U256>>::reduce_bytes(&point.to_affine().x())
   }
 }
+
+/// ECDSA over secp256k1, without identifiable aborts.
+#[cfg(feature = "secp256k1")]
+pub struct Secp256k1NoIa<P: Primes>(PhantomData<P>);
+#[cfg(feature = "secp256k1")]
+impl<CG: Element, P: Primes> Parameters<CG> for Secp256k1NoIa<P> {
+  type E = <Secp256k1<P> as Parameters<CG>>::E;
+  type F = <Secp256k1<P> as Parameters<CG>>::F;
+
+  type Evrf = <Secp256k1<P> as Parameters<CG>>::Evrf;
+  type RoundOneProofs = <Secp256k1<P> as Parameters<CG>>::RoundOneProofs;
+  type RoundTwoProofs = NoIdentifiableAborts;
+
+  fn from_xof(xof: blake3::OutputReader) -> Self::F {
+    <Secp256k1<P> as Parameters<CG>>::from_xof(xof)
+  }
+  fn hash_message(message: &[u8]) -> Self::F {
+    <Secp256k1<P> as Parameters<CG>>::hash_message(message)
+  }
+  fn x_coordinate(point: &Self::E) -> Self::F {
+    <Secp256k1<P> as Parameters<CG>>::x_coordinate(point)
+  }
+}
