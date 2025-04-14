@@ -8,7 +8,7 @@ subtle = { version = "2", default-features = false, features = ["std"] }
 zeroize = { version = "1", default-features = false, features = ["std", "derive"] }
 rand_core = { version = "0.6", default-features = false, features = ["std"] }
 crypto-bigint = { version = "0.6", default-features = false, features = ["alloc", "zeroize"] }
-crypto-bigint_xgcd = { package = "crypto-bigint", git = "https://github.com/kayabaNerve/crypto-bigint", rev = "055c58e565e465d6bb101b5f72dd62f711da4ab1", features = ["alloc", "zeroize", "extra-sizes"] }
+crypto-bigint_xgcd = { package = "crypto-bigint", git = "https://github.com/kayabaNerve/crypto-bigint", rev = "a8797b450b24cdbe85a5f80f5e080595a8cf4645", features = ["alloc", "zeroize", "extra-sizes"] }
 crypto-primes = { version = "=0.6.2", default-features = false }
 malachite = { version = "0.5", default-features = false, features = ["naturals_and_integers"] }
 rug = { version = "1", default-features = false, features = ["std", "integer"], optional = true }
