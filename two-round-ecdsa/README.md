@@ -42,8 +42,8 @@ provided in the codebase:
 
 The prover executes in variable-time, raising the question of side-channel analysis. The underlying
 `class-groups` library is variable to the backend not only to experiment with different backends,
-yet so a *constant-time* backend may be used. One should be implemented, with the prover migrated,
-before this is deployed to any security-sensitive environment.
+yet so a *constant-time* backend may be used. One should be specified before this is deployed to any
+security-sensitive environment.
 
 Currently, elements of the class group are always of the class group with discriminant $\delta_p$.
 Some elements can be left in the class group with discriminant $\delta_k$, shortening them ~10%.

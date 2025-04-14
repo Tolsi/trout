@@ -21,6 +21,5 @@ creates them (such as `rand_chacha::ChaCha20Rng`). This same premise also allows
 class group over distinct backends, as `ClassGroup::setup` will yield the same class group
 *regardless* of backend chosen.
 
-Compression of elements is implemented as described in <https://eprint.iacr.org/2020/196>, with
-slight changes for how `f` is derived from `g`. The decompression algorithm asserts the compressed
-representation was canonical.
+Compression of elements is implemented as described in <https://eprint.iacr.org/2020/196>. The
+decompression algorithm asserts the compressed representation was canonical.
