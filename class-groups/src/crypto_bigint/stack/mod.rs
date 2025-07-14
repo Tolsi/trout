@@ -211,11 +211,25 @@ impl CryptoBigintStackElement {
     debug_assert!(bool::from(carry.ct_eq(&Limb::ZERO) | (!b_gt_2_a)));
 
     // This will have a bit-length approximate to B, which fits within a WideI, so this is fine
-    let two_m_a = IStruct::from(double(m_a));
-    let epsilon_two_m_a = <_>::ct_select(&-two_m_a, &two_m_a, b.positive());
-    let epsilon_two_m_a =
-      <_>::ct_select(&epsilon_two_m_a, &IStruct::from(Uint::ZERO), b.abs().ct_eq(&Uint::ZERO));
-    let b_res = b - epsilon_two_m_a;
+    let b_res = {
+      let two_m_a = double(m_a);
+      let difference = {
+        let mut difference = WideU::ZERO;
+        let mut carry = Limb::ZERO;
+        for l in 0 .. limbs {
+          (difference.as_mut_limbs()[l], carry) =
+            b.abs().as_limbs()[l].borrowing_sub(two_m_a.as_limbs()[l], carry);
+        }
+        for l in limbs .. WideU::LIMBS {
+          difference.as_mut_limbs()[l] = carry;
+        }
+        let b_lt_two_m_a = Choice::from((carry.0 & 1) as u8);
+        let difference = IStruct::from(difference.wrapping_neg_if(b_lt_two_m_a.into()));
+        <_>::ct_select(&difference, &-difference, b_lt_two_m_a)
+      };
+      let b_res = <_>::ct_select(&-difference, &difference, b.positive());
+      <_>::ct_select(&b_res, &b, b.abs().ct_eq(&WideU::ZERO))
+    };
 
     let c_res = a;
 
