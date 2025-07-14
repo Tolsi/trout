@@ -168,9 +168,19 @@ impl CryptoBigintStackElement {
     let m_a = a << m;
     // epsilon b == |b| since epsilon = sgn(b)
     let epsilon_b = *b.abs();
-    // We calculate `- epsilon b + m a` instead of `- epsilon m b + m**2 a` so we can perform
-    // the subtraction over the smaller integers. Then we scale by `m` after
-    let m_a_minus_epsilon_b = IStruct::from(m_a) - IStruct::from(epsilon_b);
+    /*
+      We calculate `m (- epsilon b + m a)` to reduce the bit-length of the addition performed.
+
+      As `m a < epsilon b`, we calculate `epsilon b - m a`, leaving us with the negative of the
+      desired terms.
+    */
+    let mut m_a_minus_epsilon_b_neg = WideU::ZERO;
+    let mut carry = Limb::ZERO;
+    for l in 0 .. limbs {
+      (m_a_minus_epsilon_b_neg.as_mut_limbs()[l], carry) =
+        epsilon_b.as_limbs()[l].borrowing_sub(m_a.as_limbs()[l], carry);
+    }
+    debug_assert!(bool::from(carry.ct_eq(&Limb::ZERO) | (!b_gt_2_a)));
 
     // Scale by `m`
     /*
@@ -190,16 +200,15 @@ impl CryptoBigintStackElement {
       Since both fit within a `Wide*`, `m y` does and we don't need to promote it to
       `WideWideU`.
     */
-    let m_square_a_minus_epsilon_m_b_abs = IStruct::from(m_a_minus_epsilon_b.into_abs() << m);
-    let m_square_a_minus_epsilon_m_b = <_>::ct_select(
-      &-m_square_a_minus_epsilon_m_b_abs,
-      &m_square_a_minus_epsilon_m_b_abs,
-      m_a_minus_epsilon_b.positive(),
-    );
+    let m_square_a_minus_epsilon_m_b_abs = m_a_minus_epsilon_b_neg << m;
 
-    let a_res = IStruct::from(c) + m_square_a_minus_epsilon_m_b;
-    debug_assert!(bool::from(a_res.positive()));
-    let a_res = a_res.into_abs();
+    let mut a_res = WideU::ZERO;
+    let mut carry = Limb::ZERO;
+    for l in 0 .. limbs {
+      (a_res.as_mut_limbs()[l], carry) =
+        c.as_limbs()[l].borrowing_sub(m_square_a_minus_epsilon_m_b_abs.as_limbs()[l], carry);
+    }
+    debug_assert!(bool::from(carry.ct_eq(&Limb::ZERO) | (!b_gt_2_a)));
 
     // This will have a bit-length approximate to B, which fits within a WideI, so this is fine
     let two_m_a = IStruct::from(double(m_a));
