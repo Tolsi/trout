@@ -167,7 +167,7 @@ impl CryptoBigintStackElement {
     // This has bit-length approximate to `b`, so it fits within `WideU`
     let m_a = a << m;
     // epsilon b == |b| since epsilon = sgn(b)
-    let epsilon_b = *b.abs();
+    let epsilon_b = b.abs();
     /*
       We calculate `m (- epsilon b + m a)` to reduce the bit-length of the addition performed.
 
@@ -220,14 +220,18 @@ impl CryptoBigintStackElement {
           (difference.as_mut_limbs()[l], carry) =
             b.abs().as_limbs()[l].borrowing_sub(two_m_a.as_limbs()[l], carry);
         }
-        for l in limbs .. WideU::LIMBS {
-          difference.as_mut_limbs()[l] = carry;
+        // If this overflowed, apply the logical NOT to take the absolute value
+        for l in 0 .. limbs {
+          difference.as_mut_limbs()[l] ^= carry;
         }
         let b_lt_two_m_a = Choice::from((carry.0 & 1) as u8);
-        let difference = IStruct::from(difference.wrapping_neg_if(b_lt_two_m_a.into()));
+        let difference = IStruct::from(difference);
         <_>::ct_select(&difference, &-difference, b_lt_two_m_a)
       };
+      // If epsilon = 1, these were positive and the difference is as-is
+      // If epsilon = -1, these were negative and the difference must be negated
       let b_res = <_>::ct_select(&-difference, &difference, b.positive());
+      // If epsilon is equal to zero, we should've subtracted zero
       <_>::ct_select(&b_res, &b, b.abs().ct_eq(&WideU::ZERO))
     };
 
