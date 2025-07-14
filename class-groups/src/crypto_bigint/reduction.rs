@@ -1,0 +1,361 @@
+// Reduction algorithm from https://eprint.iacr.org/2022-466, implemented over types descending
+// from crypto-bigint with a thin abstraction layer.
+
+use subtle::{ConstantTimeEq, ConstantTimeLess, ConditionallySelectable, Choice};
+
+use crypto_bigint_xgcd::{
+  ConstantTimeSelect, Zero, ConstZero, BitOps, WrappingAdd, CheckedSub, WrappingMul, CheckedDiv,
+  Concat, Split, Limb, Uint,
+};
+
+// A collection of limbs and associated helper methods, all expected to execute in constant-time.
+trait Limbs:
+  ConstantTimeLess
+  + ConstantTimeSelect
+  + Zero
+  + BitOps
+  + WrappingAdd
+  + CheckedSub
+  + WrappingMul
+  + CheckedDiv
+{
+  fn as_limbs(&self) -> &[Limb];
+  fn as_mut_limbs(&mut self) -> &mut [Limb];
+  fn shl(&self, bits: u32) -> Self;
+  fn carrying_add(&self, b: &Self, carry: Limb) -> (Self, Limb);
+  fn widening_square(&self) -> (Self, Self);
+  // Divide `num`  by `denom`, returning the low bits.
+  //
+  // Returns `0` if passed `0` for the denominator.
+  fn wrapping_div(num: (Self, Self), denom: &Self) -> Self;
+}
+
+impl<const LIMBS: usize> Limbs for Uint<LIMBS>
+where
+  Uint<LIMBS>:
+    Concat<Output: ConditionallySelectable + ConstZero + CheckedDiv + Split<Output = Self>>,
+{
+  fn as_limbs(&self) -> &[Limb] {
+    crypto_bigint_xgcd::Uint::as_limbs(self)
+  }
+  fn as_mut_limbs(&mut self) -> &mut [Limb] {
+    crypto_bigint_xgcd::Uint::as_mut_limbs(self)
+  }
+  fn shl(&self, bits: u32) -> Self {
+    self.overflowing_shl(bits).unwrap_or(Self::zero())
+  }
+  fn carrying_add(&self, b: &Self, carry: Limb) -> (Self, Limb) {
+    self.carrying_add(b, carry)
+  }
+  fn widening_square(&self) -> (Self, Self) {
+    self.square_wide()
+  }
+  fn wrapping_div(num: (Self, Self), denom: &Self) -> Self {
+    let concatenated: <Self as Concat>::Output = Concat::concat(&num.0, &num.1);
+    let quotient = <<Self as Concat>::Output as CheckedDiv>::checked_div(
+      &concatenated,
+      &Concat::concat(denom, &Self::ZERO),
+    )
+    .unwrap_or(<<Self as Concat>::Output as ConstZero>::ZERO);
+    <<Self as Concat>::Output as Split>::split(&quotient).0
+  }
+}
+
+fn double<L: Limbs>(a: &L, limbs: usize) -> L {
+  let mut two_a = L::zero();
+  for l in (1 .. limbs).rev() {
+    two_a.as_mut_limbs()[l] = (a.as_limbs()[l] << 1) | (a.as_limbs()[l - 1] >> (Limb::BITS - 1));
+  }
+  two_a.as_mut_limbs()[0] = a.as_limbs()[0] << 1;
+  two_a
+}
+
+fn gt<L: Limbs>(b: &L, a: &L, limbs: usize) -> Choice {
+  let mut carry = Limb::ZERO;
+  for l in 0 .. limbs {
+    (_, carry) = a.as_limbs()[l].borrowing_sub(b.as_limbs()[l], carry);
+  }
+  Choice::from((carry.0 & 1) as u8)
+}
+
+fn step_two<L: Limbs>(a: L, b: (Choice, L), c: L) -> (L, (Choice, L), L) {
+  let c_lt_a = c.ct_lt(&a);
+  let a_apo = <_>::ct_select(&a, &c, c_lt_a);
+  /*
+    This line differs from the paper, whose described algorithm has a pair of typos (as
+    further evidenced by the correctness proof transcribing line 6,
+    "[C - epsilon m B + m**2 A]" as "[C, - epsilon m B + A**2]").
+
+    This a modification necessary for the form reduced to be equivalent
+    `(a, b, c) -> (c, -b, a)`.
+  */
+  let b_apo = ((b.0 ^ c_lt_a), b.1);
+  let c_apo = <_>::ct_select(&c, &a, c_lt_a);
+  (a_apo, b_apo, c_apo)
+}
+
+fn reduce_to_next_bit<L: Limbs>(
+  a: L,
+  b: (Choice, L),
+  c: L,
+  a_max_b_bits_bound: u32,
+) -> (L, (Choice, L), L) {
+  // Step 2
+  let (a, mut b, mut c) = step_two(a, b, c);
+
+  let limbs = usize::try_from((a_max_b_bits_bound + 4).div_ceil(Limb::BITS)).unwrap();
+  debug_assert!(limbs <= a.as_limbs().len());
+  debug_assert!(limbs <= b.1.as_limbs().len());
+
+  // Step 3
+  let two_a = double(&a, limbs);
+  let b_gt_2_a = gt(&b.1, &two_a, limbs);
+
+  let m = {
+    let b_bits = b.1.bits().wrapping_sub(1);
+    let a_bits = a.bits().wrapping_sub(1);
+    // We set `m` as the amount of bits to shift by
+    <_>::ct_select(&(b_bits.wrapping_sub(a_bits).wrapping_sub(1)), &0, a.is_zero() | (!b_gt_2_a))
+  };
+
+  /*
+    We don't implement steps 4, 5, as we only perform the binary reduction before moving to
+    the Euclidean algorithm for the final steps. If we did the conditional `m` here, we
+    wouldn't be able to optimize via its structure (due to needing to calculate both paths in
+    order to not reveal which was taken).
+  */
+
+  // Step 6
+
+  /*
+    `b**2 - 4ac = discriminant`
+
+    `b` starts as the bit-length of the discriminant, so `b**2` is twice the bit-length and
+    `a, c` is on average twice the bit-length yet each up to twice the bit-length of the
+    discriminant. Note `4ac` is within `1` of the bit-length of `b**2` when
+    `b**2 > |discriminant|`.
+
+    Because `b` decreases in size with each iteration (cite 2022-466), `4ac` must also
+    decreases in size (to remain within `1` of the bit-length of `b**2`). This is until
+    `b**2 <= |discriminant|`, at which point `4ac` is less than the bit-length of the
+    discriminant plus `1`.
+
+    Since we enforce `a < c` at the start of each iteration of the loop, we know the
+    bit-length of `a` must be less than or equal to the bit-length of `c`.
+
+    `m` is unfortunately bounded to `log_2(b) - log_2(a)`, so that is the bit-length of the
+    discriminant minus potentially 0. We then need to perform the shifts `b << m` and
+    `a << m**2`. For the former, this means operating with `WideL`. For the latter, it is
+    again `WideL` as if `m` is high, `a` itself is low.
+  */
+
+  // This has bit-length approximate to `b`, so it fits within `L`
+  let m_a = a.shl(m);
+  // epsilon b == |b| since epsilon = sgn(b)
+  // let epsilon_b = b.1;
+  /*
+    We calculate `m (- epsilon b + m a)` to reduce the bit-length of the addition performed.
+
+    As `m a < epsilon b`, we calculate `epsilon b - m a`, leaving us with the negative of the
+    desired terms.
+  */
+  let mut m_a_minus_epsilon_b_neg = L::zero();
+  let mut carry = Limb::ZERO;
+  for l in 0 .. limbs {
+    (m_a_minus_epsilon_b_neg.as_mut_limbs()[l], carry) =
+      b.1.as_limbs()[l].borrowing_sub(m_a.as_limbs()[l], carry);
+  }
+  debug_assert!(bool::from(carry.ct_eq(&Limb::ZERO) | (!b_gt_2_a)));
+
+  // Scale by `m`
+  /*
+    We now need to calculate `a_{i+1} = c_i - epsilon m b_i + m**2 a_i`.
+
+    Because `b` decreases, `a` decreases, as extensively described above. That means, because
+    it was prior in bounds, this decreased version will be. By the point `a` starts
+    increasing in size again, it's capped within bounds.
+
+    This also means that we have either `x + |m y|`, or `x - |m y|` where `x, y` and the
+    result fit within a Wide*. For the first case, where `m y` is positive and added, `m y`
+    must have bit-length less than or equal to the result. For the second case, where `m y`
+    is negative and subtracted, it is at most of bit-length `x` since the result is
+    guaranteed to be positive.
+
+    Accordingly, `m y` fits within either the bounds of the result or the bounds of `x`.
+    Since both fit within a `Wide*`, `m y` does and we don't need to promote it to
+    `WideL`.
+  */
+  let m_square_a_minus_epsilon_m_b_abs = m_a_minus_epsilon_b_neg.shl(m);
+
+  let mut a_res = L::zero();
+  let mut carry = Limb::ZERO;
+  for l in 0 .. limbs {
+    (a_res.as_mut_limbs()[l], carry) =
+      c.as_limbs()[l].borrowing_sub(m_square_a_minus_epsilon_m_b_abs.as_limbs()[l], carry);
+  }
+  debug_assert!(bool::from(carry.ct_eq(&Limb::ZERO) | (!b_gt_2_a)));
+
+  // This will have a bit-length approximate to B, which fits within a L, so this is fine
+  let b_res = {
+    let two_m_a = double(&m_a, limbs);
+    let difference = {
+      let mut difference = L::zero();
+      let mut carry = Limb::ZERO;
+      for l in 0 .. limbs {
+        (difference.as_mut_limbs()[l], carry) =
+          b.1.as_limbs()[l].borrowing_sub(two_m_a.as_limbs()[l], carry);
+      }
+      // If this overflowed, apply the logical NOT to take the absolute value
+      let mut overflow_carry = Limb::ONE & carry;
+      for l in 0 .. limbs {
+        difference.as_mut_limbs()[l] ^= carry;
+        (difference.as_mut_limbs()[l], overflow_carry) =
+          difference.as_limbs()[l].carrying_add(Limb::ZERO, overflow_carry);
+      }
+      let b_lt_two_m_a = Choice::from((carry.0 & 1) as u8);
+      (b_lt_two_m_a, difference)
+    };
+    // If epsilon = 1, these were positive and the difference is as-is
+    // If epsilon = -1, these were negative and the difference must be negated
+    // If epsilon = 0, !(b > 2 * a) so this doesn't matter
+    (difference.0 ^ b.0, difference.1)
+  };
+
+  let c_res = &a;
+
+  // Only write these values if this was the `m = 2**k` case
+  let should_iterate = b_gt_2_a;
+  let a_res = <_>::ct_select(&a, &a_res, should_iterate);
+  // The paper doesn't say to negate this here, but it was necessary when comparing the
+  // results to the textbook algorithm's
+  b.0 = <_>::ct_select(&b.0, &!b_res.0, should_iterate);
+  b.1 = <_>::ct_select(&b.1, &b_res.1, should_iterate);
+  c = <_>::ct_select(&c, c_res, should_iterate);
+
+  (a_res, b, c)
+}
+
+fn reduce_second_to_last_bit<L: Limbs>(
+  a: L,
+  b: (Choice, L),
+  c: L,
+  a_max_b_bits_bound: u32,
+) -> (L, (Choice, L), L) {
+  let (a, mut b, mut c) = step_two(a, b, c);
+
+  let limbs = usize::try_from((a_max_b_bits_bound + 4).div_ceil(Limb::BITS)).unwrap();
+  debug_assert!(limbs <= a.as_limbs().len());
+  debug_assert!(limbs <= b.1.as_limbs().len());
+
+  let b_gt_a = gt(&b.1, &a, limbs);
+
+  let m_a = &a;
+  let mut m_a_minus_epsilon_b_neg = L::zero();
+  let mut carry = Limb::ZERO;
+  for l in 0 .. limbs {
+    (m_a_minus_epsilon_b_neg.as_mut_limbs()[l], carry) =
+      b.1.as_limbs()[l].borrowing_sub(m_a.as_limbs()[l], carry);
+  }
+  debug_assert!(bool::from(carry.ct_eq(&Limb::ZERO) | (!b_gt_a)));
+
+  let m_square_a_minus_epsilon_m_b_abs = m_a_minus_epsilon_b_neg;
+
+  let mut a_res = L::zero();
+  let mut carry = Limb::ZERO;
+  for l in 0 .. limbs {
+    (a_res.as_mut_limbs()[l], carry) =
+      c.as_limbs()[l].borrowing_sub(m_square_a_minus_epsilon_m_b_abs.as_limbs()[l], carry);
+  }
+  debug_assert!(bool::from(carry.ct_eq(&Limb::ZERO) | (!b_gt_a)));
+
+  let b_res = {
+    let two_m_a = double(m_a, limbs);
+    let difference = {
+      let mut difference = L::zero();
+      let mut carry = Limb::ZERO;
+      for l in 0 .. limbs {
+        (difference.as_mut_limbs()[l], carry) =
+          b.1.as_limbs()[l].borrowing_sub(two_m_a.as_limbs()[l], carry);
+      }
+      // If this overflowed, apply the logical NOT to take the absolute value
+      let mut overflow_carry = Limb::ONE & carry;
+      for l in 0 .. limbs {
+        difference.as_mut_limbs()[l] ^= carry;
+        (difference.as_mut_limbs()[l], overflow_carry) =
+          difference.as_limbs()[l].carrying_add(Limb::ZERO, overflow_carry);
+      }
+      let b_lt_two_m_a = Choice::from((carry.0 & 1) as u8);
+      (b_lt_two_m_a, difference)
+    };
+    (difference.0 ^ b.0, difference.1)
+  };
+
+  let c_res = &a;
+
+  // Only write these values if this was the `m = 1` case
+  let should_iterate = b_gt_a;
+  let a_res = <_>::ct_select(&a, &a_res, should_iterate);
+  b.0 = <_>::ct_select(&b.0, &!b_res.0, should_iterate);
+  b.1 = <_>::ct_select(&b.1, &b_res.1, should_iterate);
+  c = <_>::ct_select(&c, c_res, should_iterate);
+
+  (a_res, b, c)
+}
+
+fn reduce_last_bit<L: Limbs>(a: L, b: (Choice, L), c: L) -> (L, (Choice, L), L) {
+  let (a, mut b, c) = step_two(a, b, c);
+  // Set `b` to be positive if `b == a`
+  b.0 = !((!b.0) | b.1.ct_eq(&a));
+  (a, b, c)
+}
+
+#[allow(private_bounds)]
+pub(super) fn reduce<L: Limbs>(
+  log_2_a_bound: u32,
+  mut a: L,
+  mut b: (Choice, L),
+  negative_discriminant: &L,
+) -> (L, (Choice, L), L) {
+  debug_assert_eq!(a.as_limbs().len(), b.1.as_limbs().len());
+
+  let mut c = {
+    // The `b` from composition is `% 2a`, so at most `b**2 = (2a-1)**2`. We increase this bound
+    // to `b**2 = 4 a**2`. `(4 a**2) / 4a` would equal `a`, meaning `c <= a` even for `a, b`
+    // directly from the composition formulas (and unreduced).
+
+    // b**2 - 4ac = discriminant
+    // b**2 = discriminant + 4ac
+    // b**2 - discriminant = 4ac
+    let (b_lo, b_hi) = b.1.widening_square();
+
+    let (mut four_ac_lo, carry) = b_lo.carrying_add(negative_discriminant, Limb::ZERO);
+    let (mut four_ac_hi, carry) = b_hi.carrying_add(&L::zero(), carry);
+    debug_assert_eq!(carry, Limb::ZERO);
+
+    let limbs = four_ac_lo.as_limbs().len();
+    let ac = {
+      for l in 0 .. (limbs - 1) {
+        four_ac_lo.as_mut_limbs()[l] =
+          (four_ac_lo.as_limbs()[l] >> 2) | four_ac_lo.as_limbs()[l + 1] << (Limb::BITS - 2);
+      }
+      four_ac_lo.as_mut_limbs()[limbs - 1] =
+        (four_ac_lo.as_limbs()[limbs - 1] >> 2) | four_ac_hi.as_limbs()[0] << (Limb::BITS - 2);
+      for l in 0 .. (limbs - 1) {
+        four_ac_hi.as_mut_limbs()[l] =
+          (four_ac_hi.as_limbs()[l] >> 2) | four_ac_hi.as_limbs()[l + 1] << (Limb::BITS - 2);
+      }
+      four_ac_hi.as_mut_limbs()[limbs - 1] = four_ac_hi.as_limbs()[limbs - 1] >> 2;
+      (four_ac_lo, four_ac_hi)
+    };
+
+    L::wrapping_div(ac, &a)
+  };
+
+  // Iterate from the current log2 of `a` to the log2 of the sqrt of the discriminant
+  let sqrt_discriminant_bits = negative_discriminant.bits_vartime().div_ceil(2);
+  for a_bits in (sqrt_discriminant_bits ..= log_2_a_bound).rev() {
+    (a, b, c) = reduce_to_next_bit(a, b, c, a_bits + 1);
+  }
+  let (a, b, c) = reduce_second_to_last_bit(a, b, c, sqrt_discriminant_bits);
+  reduce_last_bit(a, b, c)
+}

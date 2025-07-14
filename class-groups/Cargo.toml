@@ -14,6 +14,7 @@ malachite = { version = "0.5", default-features = false, features = ["naturals_a
 rug = { version = "1", default-features = false, features = ["std", "integer"], optional = true }
 
 [dev-dependencies]
+rand_core_nine = { package = "rand_core", version = "0.9", default-features = false, features = ["std", "os_rng"] }
 rand_chacha = { version = "0.3", default-features = false, features = ["std"] }
 
 [features]

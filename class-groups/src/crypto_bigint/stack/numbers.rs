@@ -24,14 +24,15 @@ pub(crate) fn mul_arbitrary_uints<
   res
 }
 
-// Calculate the difference of two `I`s, returning it and if `b` was greater
+// Calculate the difference of two `I`s, returning it and if `b` was greater.
+//
+// This assumes the difference will not have the top bit set.
 fn difference<I: Copy + Integer>(a: &I, b: &I) -> (I, Choice) {
-  let b_is_greater = b.ct_gt(a);
-  // These may contain equivalent values which is fine for this
-  let greater = I::ct_select(a, b, b_is_greater);
-  let lesser = I::ct_select(a, b, !b_is_greater);
-  let difference = greater - lesser;
-  (difference, b_is_greater)
+  debug_assert!(!a.bit_vartime(a.bits_precision() - 1));
+  let diff = a.wrapping_sub(b);
+  let b_gt = Choice::from(diff.bit_vartime(diff.bits_precision() - 1) as u8);
+  let diff = <_>::ct_select(&diff, &diff.wrapping_neg(), b_gt);
+  (diff, b_gt)
 }
 
 #[derive(Clone, Copy, Debug)]

@@ -1,3 +1,6 @@
+mod reduction;
+use reduction::reduce;
+
 mod stack;
 pub use stack::CryptoBigintStackElement;
 
