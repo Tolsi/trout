@@ -3,9 +3,9 @@ use core::ops::{Add, Neg, Sub, Mul, Div, Rem};
 use subtle::{Choice, ConstantTimeEq};
 use zeroize::Zeroize;
 
-use crypto_bigint_xgcd::{ConstantTimeSelect, WideningMul, Zero, NonZero, Integer, Uint};
+use crypto_bigint_xgcd::{ConstantTimeSelect, ConcatenatingMul, Zero, NonZero, Integer, Uint};
 #[cfg(test)]
-use crypto_bigint_xgcd::U256;
+use crypto_bigint_xgcd::{Gcd, U256};
 
 pub(crate) fn mul_arbitrary_uints<
   const LHS_LIMBS: usize,
@@ -15,12 +15,12 @@ pub(crate) fn mul_arbitrary_uints<
   a: Uint<LHS_LIMBS>,
   b: Uint<RHS_LIMBS>,
 ) -> Uint<OUTPUT_LIMBS> {
-  let (c_lo, c_hi) = a.split_mul(&b);
+  let (c_lo, c_hi) = a.widening_mul(&b);
   let c_lo = c_lo.as_words();
   let c_hi = c_hi.as_words();
   let mut res = Uint::<{ OUTPUT_LIMBS }>::ZERO;
-  res.as_words_mut()[.. c_lo.len()].copy_from_slice(c_lo);
-  res.as_words_mut()[c_lo.len() ..].copy_from_slice(c_hi);
+  res.as_mut_words()[.. c_lo.len()].copy_from_slice(c_lo);
+  res.as_mut_words()[c_lo.len() ..].copy_from_slice(c_hi);
   res
 }
 
@@ -131,20 +131,22 @@ impl<I: Copy + Integer> Neg for IStruct<I> {
   }
 }
 
-impl<IRhs: Integer, I: Copy + WideningMul<IRhs, Output: Copy> + Integer> Mul<IRhs> for IStruct<I> {
-  type Output = IStruct<<I as WideningMul<IRhs>>::Output>;
+impl<IRhs: Integer, I: Copy + ConcatenatingMul<IRhs, Output: Copy> + Integer> Mul<IRhs>
+  for IStruct<I>
+{
+  type Output = IStruct<<I as ConcatenatingMul<IRhs>>::Output>;
   fn mul(self, other: IRhs) -> Self::Output {
-    let value = self.value.widening_mul(other);
+    let value = self.value.concatenating_mul(other);
     #[allow(clippy::suspicious_arithmetic_impl)]
     IStruct { positive: self.positive | value.is_zero(), value }
   }
 }
-impl<IRhs: Copy + Integer, I: Copy + WideningMul<IRhs, Output: Copy> + Integer> Mul<IStruct<IRhs>>
-  for IStruct<I>
+impl<IRhs: Copy + Integer, I: Copy + ConcatenatingMul<IRhs, Output: Copy> + Integer>
+  Mul<IStruct<IRhs>> for IStruct<I>
 {
-  type Output = IStruct<<I as WideningMul<IRhs>>::Output>;
+  type Output = IStruct<<I as ConcatenatingMul<IRhs>>::Output>;
   fn mul(self, other: IStruct<IRhs>) -> Self::Output {
-    let value = self.value.widening_mul(other.value);
+    let value = self.value.concatenating_mul(other.value);
     // (positive * positive) | (negative * negative) | (0 * either)
     #[allow(clippy::suspicious_arithmetic_impl)]
     let positive = self.positive.ct_eq(&other.positive) | value.is_zero();
