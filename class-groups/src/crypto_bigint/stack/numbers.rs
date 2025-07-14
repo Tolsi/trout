@@ -109,7 +109,7 @@ impl<I: Copy + Integer> Add for IStruct<I> {
 impl<I: Copy + Integer> Sub for IStruct<I> {
   type Output = IStruct<I>;
   fn sub(self, other: Self) -> IStruct<I> {
-    let sum = self.value + other.value;
+    let sum = self.value.wrapping_add(&other.value);
     let (difference, other_is_greater) = difference(&self.value, &other.value);
     IStruct {
       positive: Choice::ct_select(&self.positive, &!other.positive, other_is_greater),

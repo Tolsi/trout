@@ -1,9 +1,9 @@
 use core::ops::Neg;
 
-use subtle::{ConstantTimeEq, ConstantTimeLess, ConstantTimeGreater};
+use subtle::{ConstantTimeEq, ConstantTimeLess, ConstantTimeGreater, Choice};
 use zeroize::Zeroize;
 
-use crypto_bigint_xgcd::{ConstantTimeSelect, Zero, NonZero, Integer, Uint};
+use crypto_bigint_xgcd::{ConstantTimeSelect, Zero, NonZero, Integer, Limb, Uint};
 
 use crate::Table;
 
@@ -82,166 +82,147 @@ impl crypto_bigint_xgcd::ConstantTimeSelect for CryptoBigintStackElement {
 }
 
 impl CryptoBigintStackElement {
-  fn reduce_to_next_limb<const INTERMEDIARY_LIMBS: usize>(
-    mut a: WideU,
-    mut b: WideI,
-    mut c: WideU,
+  fn reduce_to_next_bit(
+    a: WideU,
+    b: WideI,
+    c: WideU,
+    a_max_b_bits_bound: u32,
   ) -> (WideU, WideI, WideU) {
-    // https://eprint.iacr.org/2022/466, one limb at a time
-    for _ in 0 .. crypto_bigint_xgcd::Limb::BITS {
-      // Step 2
-      let (a_apo, b_apo, c_apo) = {
-        let c_lt_a = c.ct_lt(&a);
-        let a_apo = <_>::ct_select(&a, &c, c_lt_a);
-        /*
-          This line differs from the paper, whose described algorithm has a pair of typos (as
-          further evidenced by the correctness proof transcribing line 6,
-          "[C - epsilon m B + m**2 A]" as "[C, - epsilon m B + A**2]").
-
-          This a modification necessary for the form reduced to be equivalent
-          `(a, b, c) -> (c, -b, a)`.
-        */
-        let b_apo = <_>::ct_select(&b, &-b, c_lt_a);
-        let c_apo = <_>::ct_select(&c, &a, c_lt_a);
-        (a_apo, b_apo, c_apo)
-      };
-
-      let mut a_apo_small = Uint::<INTERMEDIARY_LIMBS>::ZERO;
-      a_apo_small.as_words_mut().copy_from_slice(&a_apo.as_words()[.. INTERMEDIARY_LIMBS]);
-      debug_assert!(a_apo.as_words()[INTERMEDIARY_LIMBS ..].iter().all(|b| *b == 0));
-      let mut b_apo_abs_small = Uint::<INTERMEDIARY_LIMBS>::ZERO;
-      b_apo_abs_small
-        .as_words_mut()
-        .copy_from_slice(&b_apo.abs().as_words()[.. INTERMEDIARY_LIMBS]);
-      debug_assert!(b_apo.abs().as_words()[INTERMEDIARY_LIMBS ..].iter().all(|b| *b == 0));
-      let b_apo_small = <_>::ct_select(
-        &-IStruct::from(b_apo_abs_small),
-        &IStruct::from(b_apo_abs_small),
-        b_apo.positive(),
-      );
-
-      // Step 3
-      let b_gt_2_a = b_apo_abs_small.ct_gt(&(a_apo_small.overflowing_shl_vartime(1).unwrap()));
-      let m = {
-        let b_bits = b_apo_abs_small.bits() - 1;
-        let a_bits = a_apo_small.bits() - 1;
-        // Bound these to ensure the following subtraction doesn't fail
-        let b_bits = <_>::ct_select(&1, &b_bits, b_gt_2_a);
-        let a_bits = <_>::ct_select(&0, &a_bits, b_gt_2_a);
-        // We set `m` as the amount of bits to shift by
-        b_bits - a_bits - 1
-      };
-
+    // Step 2
+    let (mut a, mut b, mut c) = {
+      let c_lt_a = c.ct_lt(&a);
+      let a_apo = <_>::ct_select(&a, &c, c_lt_a);
       /*
-        We don't implement steps 4, 5, as we only perform the binary reduction before moving to
-        the Euclidean algorithm for the final steps. If we did the conditional `m` here, we
-        wouldn't be able to optimize via its structure (due to needing to calculate both paths in
-        order to not reveal which was taken).
+        This line differs from the paper, whose described algorithm has a pair of typos (as
+        further evidenced by the correctness proof transcribing line 6,
+        "[C - epsilon m B + m**2 A]" as "[C, - epsilon m B + A**2]").
+
+        This a modification necessary for the form reduced to be equivalent
+        `(a, b, c) -> (c, -b, a)`.
       */
+      let b_apo = <_>::ct_select(&b, &-b, c_lt_a);
+      let c_apo = <_>::ct_select(&c, &a, c_lt_a);
+      (a_apo, b_apo, c_apo)
+    };
 
-      // Step 6
+    let limbs = usize::try_from((a_max_b_bits_bound + 4).div_ceil(Limb::BITS)).unwrap();
+    let double = |a: WideU| {
+      let mut two_a = WideU::ZERO;
+      for l in (1 .. limbs).rev() {
+        two_a.as_limbs_mut()[l] =
+          (a.as_limbs()[l] << 1) | (a.as_limbs()[l - 1] >> (Limb::BITS - 1));
+      }
+      two_a.as_limbs_mut()[0] = a.as_limbs()[0] << 1;
+      two_a
+    };
 
-      /*
-        `b**2 - 4ac = discriminant`
+    // Step 3
+    let two_a = double(a);
+    let b_gt_2_a = {
+      let mut carry = Limb::ZERO;
+      for l in 0 .. limbs {
+        (_, carry) = two_a.as_limbs()[l].sbb(b.abs().as_limbs()[l], carry);
+      }
+      Choice::from((carry.0 & 1) as u8)
+    };
 
-        `b` starts as the bit-length of the discriminant, so `b**2` is twice the bit-length and
-        `a, c` is on average twice the bit-length yet each up to twice the bit-length of the
-        discriminant. Note `4ac` is within `1` of the bit-length of `b**2` when
-        `b**2 > |discriminant|`.
+    let m = {
+      let b_bits = b.abs().bits().wrapping_sub(1);
+      let a_bits = a.bits().wrapping_sub(1);
+      // We set `m` as the amount of bits to shift by
+      <_>::ct_select(&(b_bits.wrapping_sub(a_bits).wrapping_sub(1)), &0, a.is_zero() | (!b_gt_2_a))
+    };
 
-        Because `b` decreases in size with each iteration (cite 2022-466), `4ac` must also
-        decreases in size (to remain within `1` of the bit-length of `b**2`). This is until
-        `b**2 <= |discriminant|`, at which point `4ac` is less than the bit-length of the
-        discriminant plus `1`.
+    /*
+      We don't implement steps 4, 5, as we only perform the binary reduction before moving to
+      the Euclidean algorithm for the final steps. If we did the conditional `m` here, we
+      wouldn't be able to optimize via its structure (due to needing to calculate both paths in
+      order to not reveal which was taken).
+    */
 
-        Since we enforce `a < c` at the start of each iteration of the loop, we know the
-        bit-length of `a` must be less than or equal to the bit-length of `c`.
+    // Step 6
 
-        `m` is unfortunately bounded to `log_2(b) - log_2(a)`, so that is the bit-length of the
-        discriminant minus potentially 0. We then need to perform the shifts `b << m` and
-        `a << m**2`. For the former, this means operating with `WideWideU`. For the latter, it is
-        again `WideWideU` as if `m` is high, `a` itself is low.
-      */
+    /*
+      `b**2 - 4ac = discriminant`
 
-      // This has bit-length approximate to `b`, so it fits within `WideU`
-      let m_a = a_apo_small << m;
-      // epsilon b == |b| since epsilon = sgn(b)
-      let epsilon_b = b_apo_abs_small;
-      // We calculate `- epsilon b + m a` instead of `- epsilon m b + m**2 a` so we can perform
-      // the subtraction over the smaller integers. Then we scale by `m` after
-      let m_a_minus_epsilon_b = IStruct::from(m_a) - IStruct::from(epsilon_b);
+      `b` starts as the bit-length of the discriminant, so `b**2` is twice the bit-length and
+      `a, c` is on average twice the bit-length yet each up to twice the bit-length of the
+      discriminant. Note `4ac` is within `1` of the bit-length of `b**2` when
+      `b**2 > |discriminant|`.
 
-      // Scale by `m`
-      /*
-        We now need to calculate `a_{i+1} = c_i - epsilon m b_i + m**2 a_i`.
+      Because `b` decreases in size with each iteration (cite 2022-466), `4ac` must also
+      decreases in size (to remain within `1` of the bit-length of `b**2`). This is until
+      `b**2 <= |discriminant|`, at which point `4ac` is less than the bit-length of the
+      discriminant plus `1`.
 
-        Because `b` decreases, `a` decreases, as extensively described above. That means, because
-        it was prior in bounds, this decreased version will be. By the point `a` starts
-        increasing in size again, it's capped within bounds.
+      Since we enforce `a < c` at the start of each iteration of the loop, we know the
+      bit-length of `a` must be less than or equal to the bit-length of `c`.
 
-        This also means that we have either `x + |m y|`, or `x - |m y|` where `x, y` and the
-        result fit within a Wide*. For the first case, where `m y` is positive and added, `m y`
-        must have bit-length less than or equal to the result. For the second case, where `m y`
-        is negative and subtracted, it is at most of bit-length `x` since the result is
-        guaranteed to be positive.
+      `m` is unfortunately bounded to `log_2(b) - log_2(a)`, so that is the bit-length of the
+      discriminant minus potentially 0. We then need to perform the shifts `b << m` and
+      `a << m**2`. For the former, this means operating with `WideWideU`. For the latter, it is
+      again `WideWideU` as if `m` is high, `a` itself is low.
+    */
 
-        Accordingly, `m y` fits within either the bounds of the result or the bounds of `x`.
-        Since both fit within a `Wide*`, `m y` does and we don't need to promote it to
-        `WideWideU`.
-      */
-      let m_square_a_minus_epsilon_m_b_abs = IStruct::from(m_a_minus_epsilon_b.into_abs() << m);
-      let m_square_a_minus_epsilon_m_b = <_>::ct_select(
-        &-m_square_a_minus_epsilon_m_b_abs,
-        &m_square_a_minus_epsilon_m_b_abs,
-        m_a_minus_epsilon_b.positive(),
-      );
+    // This has bit-length approximate to `b`, so it fits within `WideU`
+    let m_a = a << m;
+    // epsilon b == |b| since epsilon = sgn(b)
+    let epsilon_b = *b.abs();
+    // We calculate `- epsilon b + m a` instead of `- epsilon m b + m**2 a` so we can perform
+    // the subtraction over the smaller integers. Then we scale by `m` after
+    let m_a_minus_epsilon_b = IStruct::from(m_a) - IStruct::from(epsilon_b);
 
-      let m_square_a_minus_epsilon_m_b = {
-        let mut res = Uint::ZERO;
-        res.as_words_mut()[.. INTERMEDIARY_LIMBS]
-          .copy_from_slice(m_square_a_minus_epsilon_m_b.abs().as_words());
-        <_>::ct_select(
-          &-IStruct::from(res),
-          &IStruct::from(res),
-          m_square_a_minus_epsilon_m_b.positive(),
-        )
-      };
-      let a_res = IStruct::from(c_apo) + m_square_a_minus_epsilon_m_b;
-      debug_assert!(bool::from(a_res.positive()));
-      let a_res = a_res.into_abs();
+    // Scale by `m`
+    /*
+      We now need to calculate `a_{i+1} = c_i - epsilon m b_i + m**2 a_i`.
 
-      // This will have a bit-length approximate to B, which fits within a WideI, so this is fine
-      let two_m_a = IStruct::from(m_a.overflowing_shl_vartime(1).unwrap());
-      let epsilon_two_m_a = <_>::ct_select(&-two_m_a, &two_m_a, b_apo.positive());
-      let epsilon_two_m_a = <_>::ct_select(
-        &epsilon_two_m_a,
-        &IStruct::from(Uint::ZERO),
-        b_apo_abs_small.ct_eq(&Uint::ZERO),
-      );
-      let b_res = b_apo_small - epsilon_two_m_a;
+      Because `b` decreases, `a` decreases, as extensively described above. That means, because
+      it was prior in bounds, this decreased version will be. By the point `a` starts
+      increasing in size again, it's capped within bounds.
 
-      let b_res = {
-        let mut res = Uint::ZERO;
-        res.as_words_mut()[.. INTERMEDIARY_LIMBS].copy_from_slice(b_res.abs().as_words());
-        <_>::ct_select(&-IStruct::from(res), &IStruct::from(res), b_res.positive())
-      };
+      This also means that we have either `x + |m y|`, or `x - |m y|` where `x, y` and the
+      result fit within a Wide*. For the first case, where `m y` is positive and added, `m y`
+      must have bit-length less than or equal to the result. For the second case, where `m y`
+      is negative and subtracted, it is at most of bit-length `x` since the result is
+      guaranteed to be positive.
 
-      let c_res = a_apo;
+      Accordingly, `m y` fits within either the bounds of the result or the bounds of `x`.
+      Since both fit within a `Wide*`, `m y` does and we don't need to promote it to
+      `WideWideU`.
+    */
+    let m_square_a_minus_epsilon_m_b_abs = IStruct::from(m_a_minus_epsilon_b.into_abs() << m);
+    let m_square_a_minus_epsilon_m_b = <_>::ct_select(
+      &-m_square_a_minus_epsilon_m_b_abs,
+      &m_square_a_minus_epsilon_m_b_abs,
+      m_a_minus_epsilon_b.positive(),
+    );
 
-      // Only write these values if this was the `m = 2**k` case
-      let should_iterate = b_gt_2_a;
-      a = <_>::ct_select(&a, &a_res, should_iterate);
-      // The paper doesn't say to negate this here, but it was necessary when comparing the
-      // results to the textbook algorithm's
-      b = <_>::ct_select(&b, &-b_res, should_iterate);
-      c = <_>::ct_select(&c, &c_res, should_iterate);
-    }
+    let a_res = IStruct::from(c) + m_square_a_minus_epsilon_m_b;
+    debug_assert!(bool::from(a_res.positive()));
+    let a_res = a_res.into_abs();
+
+    // This will have a bit-length approximate to B, which fits within a WideI, so this is fine
+    let two_m_a = IStruct::from(double(m_a));
+    let epsilon_two_m_a = <_>::ct_select(&-two_m_a, &two_m_a, b.positive());
+    let epsilon_two_m_a =
+      <_>::ct_select(&epsilon_two_m_a, &IStruct::from(Uint::ZERO), b.abs().ct_eq(&Uint::ZERO));
+    let b_res = b - epsilon_two_m_a;
+
+    let c_res = a;
+
+    // Only write these values if this was the `m = 2**k` case
+    let should_iterate = b_gt_2_a;
+    a = <_>::ct_select(&a, &a_res, should_iterate);
+    // The paper doesn't say to negate this here, but it was necessary when comparing the
+    // results to the textbook algorithm's
+    b = <_>::ct_select(&b, &-b_res, should_iterate);
+    c = <_>::ct_select(&c, &c_res, should_iterate);
 
     (a, b, c)
   }
 
-  fn reduce(log_2_a_bound: u32, a: WideU, b: WideI, discriminant: WideI) -> Self {
-    let c: WideU = {
+  fn reduce(log_2_a_bound: u32, mut a: WideU, mut b: WideI, discriminant: WideI) -> Self {
+    let mut c: WideU = {
       // The `b` from composition is `% 2a`, so at most `b**2 = (2a-1)**2`. We increase this bound
       // to `b**2 = 4 a**2`. `(4 a**2) / 4a` would be `a`, meaning `c <= a` even for `a, b`
       // directly from the composition formulas (and unreduced).
@@ -264,138 +245,10 @@ impl CryptoBigintStackElement {
       lo
     };
 
-    // Reduce from the wide-form to the non-wide form (42 limbs -> 21 limbs)
-    let log_2_b_bound = log_2_a_bound + 1; // b % 2a on composition
-    const START_LIMBS: usize = 42;
-    const END_LIMBS: usize = 21;
-    const {
-      assert!(START_LIMBS == WideU::LIMBS);
-      assert!(END_LIMBS == U::LIMBS);
-    }
-    let (a, b, c) = if log_2_b_bound > (((START_LIMBS as u32) - 1) * crypto_bigint_xgcd::Limb::BITS)
-    {
-      Self::reduce_to_next_limb::<{ START_LIMBS }>(a, b, c)
-    } else {
-      (a, b, c)
-    };
-    let (a, b, c) = if log_2_b_bound > (((START_LIMBS as u32) - 2) * crypto_bigint_xgcd::Limb::BITS)
-    {
-      Self::reduce_to_next_limb::<{ START_LIMBS - 1 }>(a, b, c)
-    } else {
-      (a, b, c)
-    };
-    let (a, b, c) = if log_2_b_bound > (((START_LIMBS as u32) - 3) * crypto_bigint_xgcd::Limb::BITS)
-    {
-      Self::reduce_to_next_limb::<{ START_LIMBS - 2 }>(a, b, c)
-    } else {
-      (a, b, c)
-    };
-    let (a, b, c) = if log_2_b_bound > (((START_LIMBS as u32) - 4) * crypto_bigint_xgcd::Limb::BITS)
-    {
-      Self::reduce_to_next_limb::<{ START_LIMBS - 3 }>(a, b, c)
-    } else {
-      (a, b, c)
-    };
-    let (a, b, c) = if log_2_b_bound > (((START_LIMBS as u32) - 5) * crypto_bigint_xgcd::Limb::BITS)
-    {
-      Self::reduce_to_next_limb::<{ START_LIMBS - 4 }>(a, b, c)
-    } else {
-      (a, b, c)
-    };
-    let (a, b, c) = if log_2_b_bound > (((START_LIMBS as u32) - 6) * crypto_bigint_xgcd::Limb::BITS)
-    {
-      Self::reduce_to_next_limb::<{ START_LIMBS - 5 }>(a, b, c)
-    } else {
-      (a, b, c)
-    };
-    let (a, b, c) = if log_2_b_bound > (((START_LIMBS as u32) - 7) * crypto_bigint_xgcd::Limb::BITS)
-    {
-      Self::reduce_to_next_limb::<{ START_LIMBS - 6 }>(a, b, c)
-    } else {
-      (a, b, c)
-    };
-    let (a, b, c) = if log_2_b_bound > (((START_LIMBS as u32) - 8) * crypto_bigint_xgcd::Limb::BITS)
-    {
-      Self::reduce_to_next_limb::<{ START_LIMBS - 7 }>(a, b, c)
-    } else {
-      (a, b, c)
-    };
-    let (a, b, c) = if log_2_b_bound > (((START_LIMBS as u32) - 9) * crypto_bigint_xgcd::Limb::BITS)
-    {
-      Self::reduce_to_next_limb::<{ START_LIMBS - 8 }>(a, b, c)
-    } else {
-      (a, b, c)
-    };
-    let (a, b, c) =
-      if log_2_b_bound > (((START_LIMBS as u32) - 10) * crypto_bigint_xgcd::Limb::BITS) {
-        Self::reduce_to_next_limb::<{ START_LIMBS - 9 }>(a, b, c)
-      } else {
-        (a, b, c)
-      };
-    let (a, b, c) =
-      if log_2_b_bound > (((START_LIMBS as u32) - 11) * crypto_bigint_xgcd::Limb::BITS) {
-        Self::reduce_to_next_limb::<{ START_LIMBS - 10 }>(a, b, c)
-      } else {
-        (a, b, c)
-      };
-    let (a, b, c) =
-      if log_2_b_bound > (((START_LIMBS as u32) - 12) * crypto_bigint_xgcd::Limb::BITS) {
-        Self::reduce_to_next_limb::<{ START_LIMBS - 11 }>(a, b, c)
-      } else {
-        (a, b, c)
-      };
-    let (a, b, c) =
-      if log_2_b_bound > (((START_LIMBS as u32) - 13) * crypto_bigint_xgcd::Limb::BITS) {
-        Self::reduce_to_next_limb::<{ START_LIMBS - 12 }>(a, b, c)
-      } else {
-        (a, b, c)
-      };
-    let (a, b, c) =
-      if log_2_b_bound > (((START_LIMBS as u32) - 14) * crypto_bigint_xgcd::Limb::BITS) {
-        Self::reduce_to_next_limb::<{ START_LIMBS - 13 }>(a, b, c)
-      } else {
-        (a, b, c)
-      };
-    let (a, b, c) =
-      if log_2_b_bound > (((START_LIMBS as u32) - 15) * crypto_bigint_xgcd::Limb::BITS) {
-        Self::reduce_to_next_limb::<{ START_LIMBS - 14 }>(a, b, c)
-      } else {
-        (a, b, c)
-      };
-    let (a, b, c) =
-      if log_2_b_bound > (((START_LIMBS as u32) - 16) * crypto_bigint_xgcd::Limb::BITS) {
-        Self::reduce_to_next_limb::<{ START_LIMBS - 15 }>(a, b, c)
-      } else {
-        (a, b, c)
-      };
-    let (a, b, c) =
-      if log_2_b_bound > (((START_LIMBS as u32) - 17) * crypto_bigint_xgcd::Limb::BITS) {
-        Self::reduce_to_next_limb::<{ START_LIMBS - 16 }>(a, b, c)
-      } else {
-        (a, b, c)
-      };
-    let (a, b, c) =
-      if log_2_b_bound > (((START_LIMBS as u32) - 18) * crypto_bigint_xgcd::Limb::BITS) {
-        Self::reduce_to_next_limb::<{ START_LIMBS - 17 }>(a, b, c)
-      } else {
-        (a, b, c)
-      };
-    let (a, b, c) =
-      if log_2_b_bound > (((START_LIMBS as u32) - 19) * crypto_bigint_xgcd::Limb::BITS) {
-        Self::reduce_to_next_limb::<{ START_LIMBS - 18 }>(a, b, c)
-      } else {
-        (a, b, c)
-      };
-    let (a, b, c) =
-      if log_2_b_bound > (((START_LIMBS as u32) - 20) * crypto_bigint_xgcd::Limb::BITS) {
-        Self::reduce_to_next_limb::<{ START_LIMBS - 19 }>(a, b, c)
-      } else {
-        (a, b, c)
-      };
-    let (mut a, mut b, mut c) = Self::reduce_to_next_limb::<{ START_LIMBS - 20 }>(a, b, c);
-    // Reduce from 21 limbs -> [0, 21] limbs
-    for _ in 0 .. 21 {
-      Self::reduce_to_next_limb::<{ START_LIMBS - 21 }>(a, b, c);
+    // Iterate from the current log2 of `a` to the log2 of the sqrt of the discriminant
+    let sqrt_discriminant_bits = discriminant.abs().bits_vartime().div_ceil(2);
+    for a_bits in (sqrt_discriminant_bits ..= log_2_a_bound).rev() {
+      (a, b, c) = Self::reduce_to_next_bit(a, b, c, a_bits + 1);
     }
 
     // Algorithm 5.4.2 of A Course in Computational Algebraic Number Theory
