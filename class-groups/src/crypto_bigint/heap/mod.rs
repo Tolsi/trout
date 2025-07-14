@@ -68,7 +68,7 @@ impl CryptoBigintHeapElement {
       `(c, r, s)` where `c < a`. This means that the reduction algorithm always terminates with
       the result's `a` being less than `sqrt(abs(D))`.
     */
-    self.discriminant.abs().bits().div_ceil(2)
+    self.discriminant.abs().0.bits_vartime().div_ceil(2) + 1
   }
 
   fn max_bits_for_b(&self) -> u32 {
@@ -83,12 +83,16 @@ impl CryptoBigintHeapElement {
     discriminant: Arc<Integer>,
   ) -> Self {
     let mut b_decomposed = (!b.positive(), b.into_abs().0);
-    let a = a.0.resize(discriminant.abs().0.bits_precision() + 1);
-    b_decomposed.1 = b_decomposed.1.resize(discriminant.abs().precision() + 1);
+    // Resize `a` to the size of the discriminant, plus some spare bits
+    let a = a.0.resize(discriminant.abs().0.bits_vartime() + 8);
+    // Resize `b` to be the size of `a`
+    b_decomposed.1 = b_decomposed.1.resize(discriminant.abs().0.bits_vartime() + 8);
     let (a, mut b_decomposed, _c) =
       super::reduce(log_2_a_bound, a, b_decomposed, &discriminant.abs().0);
-    let a = a.resize(discriminant.abs().0.bits_precision().div_ceil(2) + 1);
-    b_decomposed.1 = b_decomposed.1.resize(discriminant.abs().0.bits_precision().div_ceil(2) + 1);
+    // Resize `a` to equal length to the square root of the discriminant
+    let a = a.resize(discriminant.abs().0.bits_vartime().div_ceil(2) + 1);
+    // Resize `b` to the size of `a`
+    b_decomposed.1 = b_decomposed.1.resize(discriminant.abs().0.bits_vartime().div_ceil(2) + 1);
     let b = Integer::from(UnsignedInteger::from(b_decomposed.1));
     Self { a: UnsignedInteger(a), b: <_>::ct_select(&b.clone(), &-b, b_decomposed.0), discriminant }
   }

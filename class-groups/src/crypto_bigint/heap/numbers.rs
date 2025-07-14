@@ -96,13 +96,6 @@ impl UnsignedInteger {
     self.0 = self.0.clone().resize(bits.max(self.0.bits_precision()));
   }
 
-  pub(crate) fn precision(&self) -> u32 {
-    self.0.bits_precision()
-  }
-  pub(crate) fn bits(&self) -> u32 {
-    self.0.bits()
-  }
-
   pub(crate) fn is_zero(&self) -> Choice {
     self.0.is_zero()
   }
