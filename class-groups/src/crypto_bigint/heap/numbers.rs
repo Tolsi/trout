@@ -9,7 +9,7 @@ use core::{
 use subtle::{Choice, ConstantTimeEq, ConstantTimeLess, ConstantTimeGreater};
 use zeroize::Zeroize;
 
-use crypto_bigint::{ConstantTimeSelect, Gcd, NonZero, BoxedUint};
+use crypto_bigint_seven::{ConstantTimeSelect, Gcd, Resize, NonZero, BoxedUint};
 
 enum Cow<'a, B> {
   Borrowed(&'a B),
@@ -32,28 +32,28 @@ impl<'a, B: Clone> Cow<'a, B> {
   }
 }
 
-fn widen<'a>(a: &'a BoxedUint, b: &'a BoxedUint) -> (Cow<'a, BoxedUint>, Cow<'a, BoxedUint>) {
+fn resize<'a>(a: &'a BoxedUint, b: &'a BoxedUint) -> (Cow<'a, BoxedUint>, Cow<'a, BoxedUint>) {
   let a_precision = a.bits_precision();
   let b_precision = b.bits_precision();
   let precision = a_precision.max(b_precision);
-  let a = if a_precision < precision { Cow::Owned(a.widen(precision)) } else { Cow::Borrowed(a) };
-  let b = if b_precision < precision { Cow::Owned(b.widen(precision)) } else { Cow::Borrowed(b) };
+  let a = if a_precision < precision { Cow::Owned(a.resize(precision)) } else { Cow::Borrowed(a) };
+  let b = if b_precision < precision { Cow::Owned(b.resize(precision)) } else { Cow::Borrowed(b) };
   (a, b)
 }
 
 // ct_select panics if the operands have different lengths
 fn boxed_uint_ct_select(a: &BoxedUint, b: &BoxedUint, choice: Choice) -> BoxedUint {
   let precision = a.bits_precision().max(b.bits_precision());
-  BoxedUint::ct_select(&a.widen(precision), &b.widen(precision), choice)
+  BoxedUint::ct_select(&a.resize(precision), &b.resize(precision), choice)
 }
 
 // div_rem panics if the operands have different lengths
 fn boxed_uint_div_rem(numerator: &BoxedUint, denominator: &BoxedUint) -> (BoxedUint, BoxedUint) {
   let denominator_bits = denominator.bits_precision();
-  let (numerator, denominator) = widen(numerator, denominator);
+  let (numerator, denominator) = resize(numerator, denominator);
   let (d, e) = numerator.as_ref().div_rem(&NonZero::new(denominator.take()).unwrap());
   // Since we know the bound on the denominator, we can reduce the remainder
-  let e = e.shorten(denominator_bits);
+  let e = e.resize(denominator_bits);
   (d, e)
 }
 
@@ -92,13 +92,8 @@ impl UnsignedInteger {
     Self(BoxedUint::from_be_slice(slice, u32::try_from(slice.len() * 8).unwrap()).unwrap())
   }
 
-  pub(crate) fn widen(&mut self, bits: u32) {
-    self.0 = self.0.widen(bits.max(self.0.bits_precision()));
-  }
-
-  pub(crate) fn shorten(&mut self, bits: u32) {
-    debug_assert!(bool::from(self.0.bits().ct_lt(&bits) | self.0.bits().ct_eq(&bits)));
-    self.0 = self.0.shorten(bits.min(self.0.bits_precision()));
+  pub(crate) fn resize(&mut self, bits: u32) {
+    self.0 = self.0.clone().resize(bits.max(self.0.bits_precision()));
   }
 
   pub(crate) fn precision(&self) -> u32 {
@@ -121,7 +116,7 @@ impl Add for &UnsignedInteger {
   fn add(self, other: Self) -> UnsignedInteger {
     // widen this to ensure it doesn't overflow
     let new_precision = self.0.bits_precision().max(other.0.bits_precision()) + 1;
-    let res = self.0.widen(new_precision);
+    let res = self.0.clone().resize(new_precision);
     UnsignedInteger(&other.0 + res)
   }
 }
@@ -147,11 +142,11 @@ impl Rem for &UnsignedInteger {
     let modulus_bits = modulus.0.bits_precision();
     let precision = self.0.bits_precision().max(modulus_bits);
 
-    let value = self.0.widen(precision);
-    let modulus = NonZero::new(modulus.0.widen(precision)).unwrap();
+    let value = self.0.clone().resize(precision);
+    let modulus = NonZero::new(modulus.0.clone().resize(precision)).unwrap();
     let rem = value % modulus;
 
-    UnsignedInteger(rem.shorten(modulus_bits))
+    UnsignedInteger(rem.resize(modulus_bits))
   }
 }
 impl Shl<u32> for &UnsignedInteger {
@@ -159,7 +154,7 @@ impl Shl<u32> for &UnsignedInteger {
   fn shl(self, shift: u32) -> UnsignedInteger {
     // widen this to ensure it doesn't overflow
     let new_precision = self.0.bits_precision() + shift;
-    UnsignedInteger(self.0.widen(new_precision) << shift)
+    UnsignedInteger(self.0.clone().resize(new_precision) << shift)
   }
 }
 impl Shr<u32> for UnsignedInteger {
@@ -373,10 +368,10 @@ impl UnsignedInteger {
       (!self_is_zero) & (!other.is_zero()),
     );
 
-    let (a, b) = widen(&self.0, &other.0);
+    let (a, b) = resize(&self.0, &other.0);
     // Calculate the gcd via the method provided by crypto-bigint
     let gcd = a.as_ref().gcd(b.as_ref());
-    UnsignedInteger(gcd.shorten(precision))
+    UnsignedInteger(gcd.resize(precision))
   }
 
   pub(crate) fn extended_gcd_part(&self, other: &Self) -> (UnsignedInteger, UnsignedInteger) {
@@ -397,7 +392,7 @@ impl UnsignedInteger {
       let b_div_g = boxed_uint_div(&b, &gcd);
 
       let a_div_g = (&UnsignedInteger(a_div_g) % &UnsignedInteger(b_div_g.clone())).0;
-      UnsignedInteger(a_div_g.inv_mod(&b_div_g).unwrap())
+      UnsignedInteger(a_div_g.invert_mod(&b_div_g).unwrap())
     };
 
     // Call with `a, b, gcd` if not a special case and `1, 2, 1` if a special case
@@ -431,7 +426,7 @@ impl UnsignedInteger {
     // Calculate `v` for `ua + vb = g`
     let v = |b: BoxedUint| {
       // This mul should inherently widen, yet was still panicing as overflowing? TODO
-      let ua = &u.0 * a.widen(a.bits_precision() + 1);
+      let ua = &u.0 * a.resize(a.bits_precision() + 1);
       let (difference, _gcd_is_greater) = difference(&ua, &gcd);
       let (v, rem) = boxed_uint_div_rem(&difference, &b);
       debug_assert!(bool::from(rem.is_zero()));

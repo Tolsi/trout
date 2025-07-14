@@ -1,10 +1,10 @@
 use core::ops::Neg;
 use std::sync::Arc;
 
-use subtle::{ConstantTimeEq, ConstantTimeLess, ConstantTimeGreater};
+use subtle::ConstantTimeEq;
 use zeroize::Zeroize;
 
-use crypto_bigint::{ConstantTimeSelect, BoxedUint};
+use crypto_bigint_seven::{ConstantTimeSelect, Resize, BoxedUint};
 
 use crate::Table;
 
@@ -45,7 +45,7 @@ impl Zeroize for CryptoBigintHeapElement {
   }
 }
 
-impl crypto_bigint::ConstantTimeSelect for CryptoBigintHeapElement {
+impl crypto_bigint_seven::ConstantTimeSelect for CryptoBigintHeapElement {
   fn ct_select(a: &Self, b: &Self, choice: subtle::Choice) -> Self {
     Self {
       a: UnsignedInteger::ct_select(&a.a, &b.a, choice),
@@ -76,120 +76,21 @@ impl CryptoBigintHeapElement {
     self.max_bits_for_a()
   }
 
-  // Algorithm 5.4.2 of A Course in Computational Algebraic Number Theory
   fn reduce(
     log_2_a_bound: u32,
-    mut a: UnsignedInteger,
-    mut b: Integer,
+    a: UnsignedInteger,
+    b: Integer,
     discriminant: Arc<Integer>,
   ) -> Self {
-    let start_a_bits = a.precision();
-
-    let mut c = {
-      // b**2 - 4ac = discriminant
-      // b**2 = discriminant + 4ac
-      // b**2 - discriminant = 4ac
-      let (c, rem) = &(&(&b * &b) - &*discriminant) / &Integer::from(&a << 2);
-      debug_assert!(bool::from(rem.is_zero()));
-      // `b**2` is positive, and `4ac` must be since subtracting it equals a negative number
-      // Since `a` is positive, `c` also must be positive
-      debug_assert!(bool::from(c.positive()));
-      c.into_abs()
-    };
-
-    // First, we establish the bound on the amount of iterations
-    let target_bits = discriminant.abs().bits().div_ceil(2);
-    let iterations = 2 + (log_2_a_bound - (target_bits - 1));
-
-    // We start our reduction by implementing step 1 and step 3
-    let mut done = {
-      // If b is negative or zero, then we check `a > b.abs()`
-      let mut neg_a_less_than_b = ((!b.positive()) | b.abs().is_zero()) & a.ct_gt(b.abs());
-      // If b is positive and non-zero, `-a` will always be `< b` as `a` is in range `[0 ..]`
-      neg_a_less_than_b |= (!b.abs().is_zero()) & b.positive();
-      let b_less_than_or_equal_to_a = (!b.positive()) | b.abs().ct_lt(&a) | b.abs().ct_eq(&a);
-
-      let jump_to_step_three = neg_a_less_than_b & b_less_than_or_equal_to_a;
-
-      // Continuation clause
-      let to_continue = a.ct_gt(&c);
-      // Only perform these writes if we jumped to step 3 and should continue
-      let prepare_for_next_step = jump_to_step_three & to_continue;
-      let neg_b = -b.clone();
-      b = Integer::ct_select(&b, &neg_b, prepare_for_next_step);
-      let a_copy = a.clone();
-      a = UnsignedInteger::ct_select(&a, &c, prepare_for_next_step);
-      c = UnsignedInteger::ct_select(&c, &a_copy, prepare_for_next_step);
-
-      // Termination clause
-      let should_neg_b = a.ct_eq(&c) & (!b.positive());
-      b = Integer::ct_select(&b, &neg_b, jump_to_step_three & (!to_continue) & should_neg_b);
-
-      jump_to_step_three & (!to_continue)
-    };
-
-    for i in 0 .. iterations {
-      let two_a = &a << 1;
-      // b / 2a
-      let (mut q, r) = &b / &two_a;
-      let r_gt_a = r.ct_gt(&a);
-      q = Integer::ct_select(
-        &q,
-        &(&q + &Integer::from(UnsignedInteger::from(BoxedUint::one()))),
-        r_gt_a,
-      );
-      let mut r = Integer::from(r);
-      r = Integer::ct_select(&r, &(&r - &Integer::from(two_a)), r_gt_a);
-
-      // Write the reduced `(c, b)` if we aren't already done
-      let b_r = (&b + &r).half();
-      let next_c = &Integer::from(c.clone()) - &(&b_r * &q);
-      debug_assert!(bool::from(next_c.positive()));
-      c = UnsignedInteger::ct_select(&c, next_c.abs(), !done);
-      b = Integer::ct_select(&b, &r, !done);
-
-      // Step 3
-
-      // Continuation clause
-      let to_continue = a.ct_gt(&c);
-      let prepare_for_next_step = !done & to_continue;
-      let neg_b = -b.clone();
-      b = Integer::ct_select(&b, &neg_b, prepare_for_next_step);
-      let a_copy = a.clone();
-      a = UnsignedInteger::ct_select(&a, &c, prepare_for_next_step);
-      c = UnsignedInteger::ct_select(&c, &a_copy, prepare_for_next_step);
-
-      // Termination clause
-      done = !prepare_for_next_step;
-      let should_neg_b = a.ct_eq(&c) & (!b.positive());
-      b = Integer::ct_select(&b, &neg_b, done & should_neg_b);
-
-      // `a` is set to `c` when `a > c`, and accordingly always reduces in size by a bit
-      a.shorten((start_a_bits - i - 1).max(target_bits));
-      // `b` is set to `r` which is in the range `-a < r <= a`, or its own negative
-      // If `b` entered this function unreduced, then `|b| <= a` and this is valid
-      b.abs_mut().shorten((start_a_bits - i).max(target_bits));
-      /*
-        `c` was set to `c - 1/2(b+r)q` in step 2. In step 3, `c` is swapped with the former `a`
-        (which always decreases in size) or the algorithm terminates. If the algorithm terminated,
-        `abs(b) <= a <= c` and `a < sqrt(abs(discriminant))`. This means `b` is at most
-        `sqrt(abs(discriminant))` and `b**2` is at most of bit-length equal to the discriminant.
-        If so, we have `k - log2(4ac) = k`. If we assume `a = 1`, which is impossible for our
-        definition of `b` yet also lets us establish clear bounds, then we get a bound of
-        `log2(c) = k - 2`.
-
-        We shorten `c` to the initial length of `a` (the longest it'll ever be) or the length of
-        the discriminant, whichever is higher.
-      */
-      c.shorten(start_a_bits.max(discriminant.abs().precision()));
-    }
-    debug_assert!(bool::from(done));
-
-    let mut res = Self { a, b, discriminant };
-    res.a.shorten(res.max_bits_for_a());
-    let max_bits_for_b = res.max_bits_for_b();
-    res.b.abs_mut().shorten(max_bits_for_b);
-    res
+    let mut b_decomposed = (!b.positive(), b.into_abs().0);
+    let a = a.0.resize(discriminant.abs().0.bits_precision() + 1);
+    b_decomposed.1 = b_decomposed.1.resize(discriminant.abs().precision() + 1);
+    let (a, mut b_decomposed, _c) =
+      super::reduce(log_2_a_bound, a, b_decomposed, &discriminant.abs().0);
+    let a = a.resize(discriminant.abs().0.bits_precision().div_ceil(2) + 1);
+    b_decomposed.1 = b_decomposed.1.resize(discriminant.abs().0.bits_precision().div_ceil(2) + 1);
+    let b = Integer::from(UnsignedInteger::from(b_decomposed.1));
+    Self { a: UnsignedInteger(a), b: <_>::ct_select(&b.clone(), &-b, b_decomposed.0), discriminant }
   }
 }
 
@@ -435,9 +336,9 @@ impl crate::Element for CryptoBigintHeapElement {
         abs_value_of_neg_discriminant,
       ))),
     };
-    res.a.widen(res.max_bits_for_a());
+    res.a.resize(res.max_bits_for_a());
     let max_bits_for_b = res.max_bits_for_b();
-    res.b.abs_mut().widen(max_bits_for_b);
+    res.b.abs_mut().resize(max_bits_for_b);
     res
   }
 
