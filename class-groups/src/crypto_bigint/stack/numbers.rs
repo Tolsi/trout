@@ -220,10 +220,7 @@ pub(crate) trait ExtendedGcd: Copy + Sized + Integer {
   // (g, u, v, self / g)
   fn extended_gcd(self, other: Self) -> (Self, Self, IStruct<Self>, Self);
 }
-impl<const LIMBS: usize, const DOUBLE: usize> ExtendedGcd for Uint<LIMBS>
-where
-  Uint<LIMBS>: crypto_bigint_xgcd::ConcatMixed<Uint<LIMBS>, MixedOutput = Uint<DOUBLE>>,
-{
+impl<const LIMBS: usize> ExtendedGcd for Uint<LIMBS> {
   fn extended_gcd_part(self, other: Self) -> (Self, Self, Self) {
     debug_assert!(bool::from((!self.ct_eq(&Self::zero())) | (!other.ct_eq(&Self::zero()))));
 
