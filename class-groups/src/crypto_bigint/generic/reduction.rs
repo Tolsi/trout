@@ -1,146 +1,15 @@
 // Reduction algorithm from https://eprint.iacr.org/2022-466, implemented over types descending
 // from crypto-bigint with a thin abstraction layer.
 
-use subtle::{ConstantTimeEq, ConstantTimeLess, ConditionallySelectable, Choice};
+use subtle::{ConstantTimeEq, Choice};
 
-use crypto_bigint_seven::{
-  ConstantTimeSelect, Zero, ConstZero, BitOps, WrappingAdd, CheckedSub, WrappingMul, CheckedDiv,
-  Concat, Split, Limb, Uint, BoxedUint,
-};
+use crypto_bigint_seven::{ConstantTimeSelect, Limb};
 
-// A collection of limbs and associated helper methods, all expected to execute in constant-time.
-trait Limbs:
-  ConstantTimeLess
-  + ConstantTimeSelect
-  + Zero
-  + BitOps
-  + WrappingAdd
-  + CheckedSub
-  + WrappingMul
-  + CheckedDiv
-{
-  fn zero(limbs: u32) -> Self;
-  fn as_limbs(&self) -> &[Limb];
-  fn as_mut_limbs(&mut self) -> &mut [Limb];
-  fn shl(&self, bits: u32) -> Self;
-  fn carrying_add(&self, b: &Self, carry: Limb) -> (Self, Limb);
-  fn widening_square(&self) -> (Self, Self);
-  // Divide `num`  by `denom`, returning the low bits.
-  //
-  // Returns `0` if passed `0` for the denominator.
-  fn wrapping_div(num: (Self, Self), denom: &Self) -> Self;
-  fn ct_select(a: &Self, b: &Self, choice: Choice) -> Self;
-}
+use super::Limbs;
 
-impl<const LIMBS: usize> Limbs for Uint<LIMBS>
-where
-  Uint<LIMBS>:
-    Concat<Output: ConditionallySelectable + ConstZero + CheckedDiv + Split<Output = Self>>,
-{
-  fn zero(_limbs: u32) -> Self {
-    Self::ZERO
-  }
-  fn as_limbs(&self) -> &[Limb] {
-    Uint::as_limbs(self)
-  }
-  fn as_mut_limbs(&mut self) -> &mut [Limb] {
-    Uint::as_mut_limbs(self)
-  }
-  fn shl(&self, bits: u32) -> Self {
-    self.overflowing_shl(bits).unwrap_or(Self::ZERO)
-  }
-  fn carrying_add(&self, b: &Self, carry: Limb) -> (Self, Limb) {
-    self.carrying_add(b, carry)
-  }
-  fn widening_square(&self) -> (Self, Self) {
-    self.square_wide()
-  }
-  fn wrapping_div(num: (Self, Self), denom: &Self) -> Self {
-    let concatenated: <Self as Concat>::Output = Concat::concat(&num.0, &num.1);
-    let quotient = <<Self as Concat>::Output as CheckedDiv>::checked_div(
-      &concatenated,
-      &Concat::concat(denom, &Self::ZERO),
-    )
-    .unwrap_or(<<Self as Concat>::Output as ConstZero>::ZERO);
-    <<Self as Concat>::Output as Split>::split(&quotient).0
-  }
-  fn ct_select(a: &Self, b: &Self, choice: Choice) -> Self {
-    <Self as ConstantTimeSelect>::ct_select(a, b, choice)
-  }
-}
-
-impl Limbs for BoxedUint {
-  fn zero(limbs: u32) -> Self {
-    use crypto_bigint_seven::Resize;
-    <Self as Zero>::zero().resize(limbs * Limb::BITS + 1)
-  }
-  fn as_limbs(&self) -> &[Limb] {
-    BoxedUint::as_limbs(self)
-  }
-  fn as_mut_limbs(&mut self) -> &mut [Limb] {
-    BoxedUint::as_mut_limbs(self)
-  }
-  fn shl(&self, bits: u32) -> Self {
-    self.overflowing_shl(bits).0
-  }
-  fn carrying_add(&self, b: &Self, carry: Limb) -> (Self, Limb) {
-    self.carrying_add(b, carry)
-  }
-  fn widening_square(&self) -> (Self, Self) {
-    use crypto_bigint_seven::Resize;
-    let size = self.bits_precision();
-    let square = self.square().clone();
-    let hi = (&square >> size).resize_unchecked(size);
-    let lo = square.resize_unchecked(size);
-    (lo, hi)
-  }
-  fn wrapping_div(num: (Self, Self), denom: &Self) -> Self {
-    use crypto_bigint_seven::{ShlVartime, Resize};
-
-    let denom_bits = u32::try_from(denom.as_limbs().len()).unwrap() * Limb::BITS;
-    let num = num.1.resize(2 * denom_bits).overflowing_shl_vartime(denom_bits).unwrap() | num.0;
-    let denom_is_zero = denom.is_zero();
-    let denom = <_ as ConstantTimeSelect>::ct_select(
-      denom,
-      &BoxedUint::one().resize(denom.bits_precision()),
-      denom_is_zero,
-    )
-    .resize(num.bits_precision());
-    let quotient = <_ as ConstantTimeSelect>::ct_select(
-      &num.checked_div(&denom).unwrap(),
-      &BoxedUint::zero().resize(num.bits_precision()),
-      denom_is_zero,
-    );
-    quotient.resize(denom_bits)
-  }
-  fn ct_select(a: &Self, b: &Self, choice: Choice) -> Self {
-    use crypto_bigint_seven::Resize;
-    let a = a.resize(a.bits_precision().max(b.bits_precision()));
-    let b = b.resize(a.bits_precision().max(b.bits_precision()));
-    <_ as ConstantTimeSelect>::ct_select(&a, &b, choice)
-  }
-}
-
-fn double<L: Limbs>(a: &L, limbs: usize) -> L {
-  let mut two_a = <L as Limbs>::zero(u32::try_from(limbs).unwrap());
-  for l in (1 .. limbs).rev() {
-    two_a.as_mut_limbs()[l] = (a.as_limbs()[l] << 1) | (a.as_limbs()[l - 1] >> (Limb::BITS - 1));
-  }
-  two_a.as_mut_limbs()[0] = a.as_limbs()[0] << 1;
-  two_a
-}
-
-fn gt<L: Limbs>(b: &L, a: &L, limbs: usize) -> Choice {
-  let mut carry = Limb::ZERO;
-  for l in 0 .. limbs {
-    (_, carry) = a.as_limbs()[l].borrowing_sub(b.as_limbs()[l], carry);
-  }
-  Choice::from((carry.0 & 1) as u8)
-}
-
-fn step_two<L: Limbs>(a: L, b: (Choice, L), c: L) -> (L, (Choice, L), L) {
-  let c_lt_a = c.ct_lt(&a);
-  let a_apo = <L as Limbs>::ct_select(&a, &c, c_lt_a);
+fn step_two<L: Limbs>(a: &L, b: (Choice, L), c: L, limbs: usize) -> (L, (Choice, L), L) {
+  let c_lt_a = c.lt(a, limbs);
+  let a_apo = <L as Limbs>::ct_select(a, &c, limbs, c_lt_a);
   /*
     This line differs from the paper, whose described algorithm has a pair of typos (as
     further evidenced by the correctness proof transcribing line 6,
@@ -150,7 +19,7 @@ fn step_two<L: Limbs>(a: L, b: (Choice, L), c: L) -> (L, (Choice, L), L) {
     `(a, b, c) -> (c, -b, a)`.
   */
   let b_apo = ((b.0 ^ c_lt_a), b.1);
-  let c_apo = <L as Limbs>::ct_select(&c, &a, c_lt_a);
+  let c_apo = <L as Limbs>::ct_select(&c, a, limbs, c_lt_a);
   (a_apo, b_apo, c_apo)
 }
 
@@ -160,16 +29,16 @@ fn reduce_to_next_bit<L: Limbs>(
   c: L,
   a_max_b_bits_bound: u32,
 ) -> (L, (Choice, L), L) {
-  // Step 2
-  let (a, mut b, mut c) = step_two(a, b, c);
-
   let limbs = usize::try_from((a_max_b_bits_bound + 4).div_ceil(Limb::BITS)).unwrap();
   debug_assert!(limbs <= a.as_limbs().len());
   debug_assert!(limbs <= b.1.as_limbs().len());
 
+  // Step 2
+  let (a, mut b, mut c) = step_two(&a, b, c, limbs);
+
   // Step 3
-  let two_a = double(&a, limbs);
-  let b_gt_2_a = gt(&b.1, &two_a, limbs);
+  let two_a = a.double(limbs);
+  let b_gt_2_a = b.1.gt(&two_a, limbs);
 
   let m = {
     let b_bits = b.1.bits().wrapping_sub(1);
@@ -223,7 +92,7 @@ fn reduce_to_next_bit<L: Limbs>(
     As `m a < epsilon b`, we calculate `epsilon b - m a`, leaving us with the negative of the
     desired terms.
   */
-  let mut m_a_minus_epsilon_b_neg = <L as Limbs>::zero(u32::try_from(limbs).unwrap());
+  let mut m_a_minus_epsilon_b_neg = <L as Limbs>::zero(limbs);
   let mut carry = Limb::ZERO;
   for l in 0 .. limbs {
     (m_a_minus_epsilon_b_neg.as_mut_limbs()[l], carry) =
@@ -251,7 +120,7 @@ fn reduce_to_next_bit<L: Limbs>(
   */
   let m_square_a_minus_epsilon_m_b_abs = m_a_minus_epsilon_b_neg.shl(m);
 
-  let mut a_res = <L as Limbs>::zero(u32::try_from(limbs).unwrap());
+  let mut a_res = <L as Limbs>::zero(limbs);
   let mut carry = Limb::ZERO;
   for l in 0 .. limbs {
     (a_res.as_mut_limbs()[l], carry) =
@@ -261,9 +130,9 @@ fn reduce_to_next_bit<L: Limbs>(
 
   // This will have a bit-length approximate to B, which fits within a L, so this is fine
   let b_res = {
-    let two_m_a = double(&m_a, limbs);
+    let two_m_a = m_a.double(limbs);
     let difference = {
-      let mut difference = <L as Limbs>::zero(u32::try_from(limbs).unwrap());
+      let mut difference = <L as Limbs>::zero(limbs);
       let mut carry = Limb::ZERO;
       for l in 0 .. limbs {
         (difference.as_mut_limbs()[l], carry) =
@@ -289,12 +158,12 @@ fn reduce_to_next_bit<L: Limbs>(
 
   // Only write these values if this was the `m = 2**k` case
   let should_iterate = b_gt_2_a;
-  let a_res = <L as Limbs>::ct_select(&a, &a_res, should_iterate);
+  let a_res = <L as Limbs>::ct_select(&a, &a_res, limbs, should_iterate);
   // The paper doesn't say to negate this here, but it was necessary when comparing the
   // results to the textbook algorithm's
   b.0 = <_ as ConstantTimeSelect>::ct_select(&b.0, &!b_res.0, should_iterate);
-  b.1 = <L as Limbs>::ct_select(&b.1, &b_res.1, should_iterate);
-  c = <L as Limbs>::ct_select(&c, c_res, should_iterate);
+  b.1 = <L as Limbs>::ct_select(&b.1, &b_res.1, limbs, should_iterate);
+  c = <L as Limbs>::ct_select(&c, c_res, limbs, should_iterate);
 
   (a_res, b, c)
 }
@@ -305,16 +174,16 @@ fn reduce_second_to_last_bit<L: Limbs>(
   c: L,
   a_max_b_bits_bound: u32,
 ) -> (L, (Choice, L), L) {
-  let (a, mut b, mut c) = step_two(a, b, c);
-
   let limbs = usize::try_from((a_max_b_bits_bound + 4).div_ceil(Limb::BITS)).unwrap();
   debug_assert!(limbs <= a.as_limbs().len());
   debug_assert!(limbs <= b.1.as_limbs().len());
 
-  let b_gt_a = gt(&b.1, &a, limbs);
+  let (a, mut b, mut c) = step_two(&a, b, c, limbs);
+
+  let b_gt_a = b.1.gt(&a, limbs);
 
   let m_a = &a;
-  let mut m_a_minus_epsilon_b_neg = <L as Limbs>::zero(u32::try_from(limbs).unwrap());
+  let mut m_a_minus_epsilon_b_neg = <L as Limbs>::zero(limbs);
   let mut carry = Limb::ZERO;
   for l in 0 .. limbs {
     (m_a_minus_epsilon_b_neg.as_mut_limbs()[l], carry) =
@@ -324,7 +193,7 @@ fn reduce_second_to_last_bit<L: Limbs>(
 
   let m_square_a_minus_epsilon_m_b_abs = m_a_minus_epsilon_b_neg;
 
-  let mut a_res = <L as Limbs>::zero(u32::try_from(limbs).unwrap());
+  let mut a_res = <L as Limbs>::zero(limbs);
   let mut carry = Limb::ZERO;
   for l in 0 .. limbs {
     (a_res.as_mut_limbs()[l], carry) =
@@ -333,15 +202,14 @@ fn reduce_second_to_last_bit<L: Limbs>(
   debug_assert!(bool::from(carry.ct_eq(&Limb::ZERO) | (!b_gt_a)));
 
   let b_res = {
-    let two_m_a = double(m_a, limbs);
+    let two_m_a = m_a.double(limbs);
     let difference = {
-      let mut difference = <L as Limbs>::zero(u32::try_from(limbs).unwrap());
+      let mut difference = <L as Limbs>::zero(limbs);
       let mut carry = Limb::ZERO;
       for l in 0 .. limbs {
         (difference.as_mut_limbs()[l], carry) =
           b.1.as_limbs()[l].borrowing_sub(two_m_a.as_limbs()[l], carry);
       }
-      // If this overflowed, apply the logical NOT to take the absolute value
       let mut overflow_carry = Limb::ONE & carry;
       for l in 0 .. limbs {
         difference.as_mut_limbs()[l] ^= carry;
@@ -358,23 +226,23 @@ fn reduce_second_to_last_bit<L: Limbs>(
 
   // Only write these values if this was the `m = 1` case
   let should_iterate = b_gt_a;
-  let a_res = <L as Limbs>::ct_select(&a, &a_res, should_iterate);
+  let a_res = <L as Limbs>::ct_select(&a, &a_res, limbs, should_iterate);
   b.0 = <_ as ConstantTimeSelect>::ct_select(&b.0, &!b_res.0, should_iterate);
-  b.1 = <L as Limbs>::ct_select(&b.1, &b_res.1, should_iterate);
-  c = <L as Limbs>::ct_select(&c, c_res, should_iterate);
+  b.1 = <L as Limbs>::ct_select(&b.1, &b_res.1, limbs, should_iterate);
+  c = <L as Limbs>::ct_select(&c, c_res, limbs, should_iterate);
 
   (a_res, b, c)
 }
 
 fn reduce_last_bit<L: Limbs>(a: L, b: (Choice, L), c: L) -> (L, (Choice, L), L) {
-  let (a, mut b, c) = step_two(a, b, c);
+  let (a, mut b, c) = step_two(&a, b, c, a.as_limbs().len());
   // Set `b` to be positive if `b == a`
   b.0 = !((!b.0) | b.1.ct_eq(&a));
   (a, b, c)
 }
 
 #[allow(private_bounds)]
-pub(super) fn reduce<L: Limbs>(
+pub(crate) fn reduce<L: Limbs>(
   log_2_a_bound: u32,
   mut a: L,
   mut b: (Choice, L),
@@ -393,10 +261,7 @@ pub(super) fn reduce<L: Limbs>(
     let (b_lo, b_hi) = b.1.widening_square();
 
     let (mut four_ac_lo, carry) = b_lo.carrying_add(negative_discriminant, Limb::ZERO);
-    let (mut four_ac_hi, carry) = b_hi.carrying_add(
-      &<L as Limbs>::zero(u32::try_from(a.as_limbs().len()).unwrap() * Limb::BITS),
-      carry,
-    );
+    let (mut four_ac_hi, carry) = b_hi.carrying_add(&<L as Limbs>::zero(a.as_limbs().len()), carry);
     debug_assert_eq!(carry, Limb::ZERO);
 
     let limbs = four_ac_lo.as_limbs().len();

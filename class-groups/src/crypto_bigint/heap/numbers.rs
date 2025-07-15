@@ -36,15 +36,23 @@ fn resize<'a>(a: &'a BoxedUint, b: &'a BoxedUint) -> (Cow<'a, BoxedUint>, Cow<'a
   let a_precision = a.bits_precision();
   let b_precision = b.bits_precision();
   let precision = a_precision.max(b_precision);
-  let a = if a_precision < precision { Cow::Owned(a.resize(precision)) } else { Cow::Borrowed(a) };
-  let b = if b_precision < precision { Cow::Owned(b.resize(precision)) } else { Cow::Borrowed(b) };
+  let a = if a_precision < precision {
+    Cow::Owned(a.resize_unchecked(precision))
+  } else {
+    Cow::Borrowed(a)
+  };
+  let b = if b_precision < precision {
+    Cow::Owned(b.resize_unchecked(precision))
+  } else {
+    Cow::Borrowed(b)
+  };
   (a, b)
 }
 
 // ct_select panics if the operands have different lengths
 fn boxed_uint_ct_select(a: &BoxedUint, b: &BoxedUint, choice: Choice) -> BoxedUint {
   let precision = a.bits_precision().max(b.bits_precision());
-  BoxedUint::ct_select(&a.resize(precision), &b.resize(precision), choice)
+  BoxedUint::ct_select(&a.resize_unchecked(precision), &b.resize_unchecked(precision), choice)
 }
 
 // div_rem panics if the operands have different lengths
@@ -93,7 +101,7 @@ impl UnsignedInteger {
   }
 
   pub(crate) fn resize(&mut self, bits: u32) {
-    self.0 = self.0.clone().resize(bits.max(self.0.bits_precision()));
+    self.0 = self.0.clone().resize_unchecked(bits.max(self.0.bits_precision()));
   }
 
   pub(crate) fn is_zero(&self) -> Choice {
@@ -109,7 +117,7 @@ impl Add for &UnsignedInteger {
   fn add(self, other: Self) -> UnsignedInteger {
     // widen this to ensure it doesn't overflow
     let new_precision = self.0.bits_precision().max(other.0.bits_precision()) + 1;
-    let res = self.0.clone().resize(new_precision);
+    let res = self.0.clone().resize_unchecked(new_precision);
     UnsignedInteger(&other.0 + res)
   }
 }
@@ -135,11 +143,11 @@ impl Rem for &UnsignedInteger {
     let modulus_bits = modulus.0.bits_precision();
     let precision = self.0.bits_precision().max(modulus_bits);
 
-    let value = self.0.clone().resize(precision);
-    let modulus = NonZero::new(modulus.0.clone().resize(precision)).unwrap();
+    let value = self.0.clone().resize_unchecked(precision);
+    let modulus = NonZero::new(modulus.0.clone().resize_unchecked(precision)).unwrap();
     let rem = value % modulus;
 
-    UnsignedInteger(rem.resize(modulus_bits))
+    UnsignedInteger(rem.resize_unchecked(modulus_bits))
   }
 }
 impl Shl<u32> for &UnsignedInteger {
@@ -147,7 +155,7 @@ impl Shl<u32> for &UnsignedInteger {
   fn shl(self, shift: u32) -> UnsignedInteger {
     // widen this to ensure it doesn't overflow
     let new_precision = self.0.bits_precision() + shift;
-    UnsignedInteger(self.0.clone().resize(new_precision) << shift)
+    UnsignedInteger(self.0.clone().resize_unchecked(new_precision) << shift)
   }
 }
 impl Shr<u32> for UnsignedInteger {
@@ -364,7 +372,7 @@ impl UnsignedInteger {
     let (a, b) = resize(&self.0, &other.0);
     // Calculate the gcd via the method provided by crypto-bigint
     let gcd = a.as_ref().gcd(b.as_ref());
-    UnsignedInteger(gcd.resize(precision))
+    UnsignedInteger(gcd.resize_unchecked(precision))
   }
 
   pub(crate) fn extended_gcd_part(&self, other: &Self) -> (UnsignedInteger, UnsignedInteger) {

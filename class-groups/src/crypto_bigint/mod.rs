@@ -1,5 +1,5 @@
-mod reduction;
-use reduction::reduce;
+mod generic;
+use generic::reduce;
 
 mod stack;
 pub use stack::CryptoBigintStackElement;
