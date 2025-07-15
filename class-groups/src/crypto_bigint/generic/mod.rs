@@ -39,6 +39,7 @@ trait Limbs: Sized + ConstantTimeEq + BitOps {
     two_a
   }
 
+  #[allow(unused)]
   fn ct_eq(a: &Self, b: &Self, limbs: usize) -> Choice {
     let mut res = Choice::from(1u8);
     for l in 0 .. limbs {

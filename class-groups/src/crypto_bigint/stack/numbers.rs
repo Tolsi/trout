@@ -52,7 +52,7 @@ impl<I: Copy + Integer> IStruct<I> {
   }
   #[must_use]
   pub(crate) fn half(mut self) -> Self {
-    self.value >>= 1u32;
+    self.value = self.value.overflowing_shr_vartime(1u32).unwrap();
     self.positive = Choice::ct_select(&self.positive, &1.into(), self.value.ct_eq(&I::zero()));
     self
   }

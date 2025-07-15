@@ -340,13 +340,14 @@ impl crate::Element for CryptoBigintStackElement {
     let wide_e = WideU::from((e, U::ZERO));
     let congruence_3 = {
       let congruence_3_rhs = {
-        let congruence_3_rhs_numerator = self.discriminant + (self.b * self.b);
+        let congruence_3_rhs_numerator =
+          -IStruct::from(*self.discriminant.abs() - self.b.abs().widening_square());
         let (congruence_3_rhs_mul_2, rem) = congruence_3_rhs_numerator / wide_e;
         debug_assert!(bool::from(rem.is_zero()));
         congruence_3_rhs_mul_2.half()
       } % mod_3;
 
-      let congruence_3_lhs_factor = B_mu_div_e.widen::<WideU>();
+      let congruence_3_lhs_factor = B_mu_div_e;
 
       /*
         We have `ax congruent to b mod c`.
