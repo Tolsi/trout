@@ -285,8 +285,10 @@ pub(crate) fn reduce<L: Limbs>(
 
   // Iterate from the current log2 of `a` to the log2 of the sqrt of the discriminant
   let sqrt_discriminant_bits = negative_discriminant.bits_vartime().div_ceil(2);
-  for a_bits in (sqrt_discriminant_bits ..= log_2_a_bound).rev() {
-    (a, b, c) = reduce_to_next_bit(a, b, c, a_bits + 1);
+  // TODO: There's presumably a better bound on the amount of iterations premised on the
+  // minium/maximum size for `a` and the distance between `a`, `b`
+  for a_bits in (0 ..= log_2_a_bound).rev() {
+    (a, b, c) = reduce_to_next_bit(a, b, c, a_bits.max(sqrt_discriminant_bits) + 1);
   }
   let (a, b, c) = reduce_second_to_last_bit(a, b, c, sqrt_discriminant_bits);
   reduce_last_bit(a, b, c)
