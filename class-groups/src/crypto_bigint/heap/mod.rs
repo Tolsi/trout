@@ -4,7 +4,7 @@ use std::sync::Arc;
 use subtle::ConstantTimeEq;
 use zeroize::Zeroize;
 
-use crypto_bigint_seven::{ConstantTimeSelect, Resize, BoxedUint};
+use crypto_bigint::{ConstantTimeSelect, Resize, BoxedUint};
 
 use crate::Table;
 
@@ -45,7 +45,7 @@ impl Zeroize for CryptoBigintHeapElement {
   }
 }
 
-impl crypto_bigint_seven::ConstantTimeSelect for CryptoBigintHeapElement {
+impl crypto_bigint::ConstantTimeSelect for CryptoBigintHeapElement {
   fn ct_select(a: &Self, b: &Self, choice: subtle::Choice) -> Self {
     Self {
       a: UnsignedInteger::ct_select(&a.a, &b.a, choice),

@@ -3,9 +3,9 @@ use core::ops::{Add, Neg, Sub, Mul, Div, Rem};
 use subtle::{Choice, ConstantTimeEq};
 use zeroize::Zeroize;
 
-use crypto_bigint_seven::{ConstantTimeSelect, ConcatenatingMul, Zero, NonZero, Integer, Uint};
+use crypto_bigint::{ConstantTimeSelect, ConcatenatingMul, Zero, NonZero, Integer, Uint};
 #[cfg(test)]
-use crypto_bigint_seven::{Gcd, U256};
+use crypto_bigint::{Gcd, U256};
 
 pub(crate) fn mul_arbitrary_uints<
   const LHS_LIMBS: usize,
@@ -444,11 +444,11 @@ fn gcd() {
   }
 
   {
-    let a = crypto_bigint_seven::U512::from_be_hex(concat!(
+    let a = crypto_bigint::U512::from_be_hex(concat!(
       "0000000000000000000000000000000000000000000000000000000000000000",
       "000000000000000000000000000000000000001A0DEEF6F3AC2566149D925044"
     ));
-    let b = crypto_bigint_seven::U512::from_be_hex(concat!(
+    let b = crypto_bigint::U512::from_be_hex(concat!(
       "0000000000000000000000000000000000000000000000000000000000000000",
       "000000000000072B69C9DD0AA15F135675EA9C5180CF8FF0A59298CFC92E87FA"
     ));

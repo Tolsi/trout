@@ -10,7 +10,7 @@ use group::{
   prime::PrimeGroup,
   ff::{Field, PrimeField, PrimeFieldBits},
 };
-use ciphersuite::Ciphersuite;
+use ciphersuite::{group::ff::FromUniformBytes, Ciphersuite};
 
 use generalized_bulletproofs::*;
 use generalized_bulletproofs_circuit_abstraction::*;
@@ -160,7 +160,7 @@ impl<G: EmbeddedCurve> DiscreteLogarithm<G> {
     )
     .unwrap()
   }
-  fn commit<C: Ciphersuite<F = G::FieldElement>>(
+  fn commit<C: Clone + Ciphersuite<F = G::FieldElement>>(
     rng: &mut (impl RngCore + CryptoRng),
     scalar: &G::Scalar,
   ) -> Zeroizing<PedersenVectorCommitment<C>> {
@@ -241,7 +241,7 @@ impl<G: EmbeddedCurve> DiscreteLogarithm<G> {
     }
     // The value which will be used by the nonce
     values.push(C::F::ZERO);
-    Zeroizing::new(PedersenVectorCommitment { g_values: values.into(), mask: C::F::random(rng) })
+    Zeroizing::new(PedersenVectorCommitment { g_values: values, mask: C::F::random(rng) })
   }
 }
 
@@ -422,7 +422,7 @@ impl<G: EmbeddedCurve> Iterator for P_iIterator<'_, G> {
 // Claim 2
 struct P;
 impl P {
-  fn evaluate<C: Ciphersuite, G: EmbeddedCurve<FieldElement = C::F>>(
+  fn evaluate<C: Clone + Ciphersuite<F: FromUniformBytes<64>>, G: EmbeddedCurve<FieldElement = C::F>>(
     circuit: &mut Circuit<C>,
     C: &[G],
     X: &[G],
@@ -525,13 +525,13 @@ impl P {
   This means we only duplicate the allocation/formatting of the constraints themselves.
 */
 #[derive(Clone)]
-struct CommonCircuit<C: Ciphersuite, G: EmbeddedCurve<FieldElement = C::F>>(
+struct CommonCircuit<C: Clone + Ciphersuite<F: FromUniformBytes<64>>, G: EmbeddedCurve<FieldElement = C::F>>(
   Circuit<C>,
   Variable,
   Variable,
   PhantomData<G>,
 );
-impl<C: Ciphersuite, G: EmbeddedCurve<FieldElement = C::F>> CommonCircuit<C, G> {
+impl<C: Clone + Ciphersuite<F: FromUniformBytes<64>>, G: EmbeddedCurve<FieldElement = C::F>> CommonCircuit<C, G> {
   fn new(
     C: &[G],
     X_0: &[G],
@@ -560,7 +560,7 @@ impl<C: Ciphersuite, G: EmbeddedCurve<FieldElement = C::F>> CommonCircuit<C, G> 
 
 /// The global setup for the DDH eVRF.
 #[derive(Clone)]
-pub struct DdhEvrfGlobalSetup<C: Ciphersuite, G: EmbeddedCurve<FieldElement = C::F>> {
+pub struct DdhEvrfGlobalSetup<C: Clone + Ciphersuite<F: FromUniformBytes<64>>, G: EmbeddedCurve<FieldElement = C::F>> {
   generators: Generators<C>,
   C: Vec<G>,
   C_xy: CXY<G::FieldElement>,
@@ -578,13 +578,13 @@ pub struct DdhEvrfGlobalSetup<C: Ciphersuite, G: EmbeddedCurve<FieldElement = C:
   they could already so by committing to a $k$ value greater than or equal to $2**ceil_log_2(s)$.
 */
 #[derive(Clone)]
-pub struct DdhEvrfSetupView<C: Ciphersuite> {
+pub struct DdhEvrfSetupView<C: Clone + Ciphersuite> {
   Q: C::G,
   k_apostrophe: C::F,
 }
-impl<C: Ciphersuite> DdhEvrfSetupView<C> {
+impl<C: Clone + Ciphersuite<F: FromUniformBytes<64>>,> DdhEvrfSetupView<C> {
   fn new(Q: C::G) -> Self {
-    let k_apostrophe = C::reduce_512({
+    let k_apostrophe = C::F::from_uniform_bytes(&{
       let mut hasher = blake3::Hasher::new();
       hasher.update(Q.to_bytes().as_ref());
       let mut bytes = [0; 64];
@@ -598,7 +598,7 @@ impl<C: Ciphersuite> DdhEvrfSetupView<C> {
 
 /// A setup for the eVRF.
 #[derive(Clone)]
-pub struct DdhEvrfSetup<C: Ciphersuite, G: EmbeddedCurve<FieldElement = C::F>> {
+pub struct DdhEvrfSetup<C: Clone + Ciphersuite<F: FromUniformBytes<64>>, G: EmbeddedCurve<FieldElement = C::F>> {
   k: Zeroizing<G::Scalar>,
   Q: Zeroizing<PedersenVectorCommitment<C>>,
   Q_commitment: C::G,
@@ -606,7 +606,7 @@ pub struct DdhEvrfSetup<C: Ciphersuite, G: EmbeddedCurve<FieldElement = C::F>> {
 }
 
 /// The context for the DDH eVRF.
-pub struct DdhEvrfContext<C: Ciphersuite, G: EmbeddedCurve<FieldElement = C::F>> {
+pub struct DdhEvrfContext<C: Clone + Ciphersuite<F: FromUniformBytes<64>>, G: EmbeddedCurve<FieldElement = C::F>> {
   X_0: Vec<G>,
   X_0_delta_i: Delta_i<G>,
   X_1: Vec<G>,
@@ -625,11 +625,11 @@ fn random_point<G: GroupEncoding>(xof: &mut blake3::OutputReader) -> G {
 }
 
 /// The DDH-premised eVRF proposed within the eVRF paper.
-pub struct DdhEvrf<C: Ciphersuite, G: EmbeddedCurve<FieldElement = C::F>>(PhantomData<(C, G)>);
+pub struct DdhEvrf<C: Clone + Ciphersuite<F: FromUniformBytes<64>>, G: EmbeddedCurve<FieldElement = C::F>>(PhantomData<(C, G)>);
 impl<
   CG: class_groups::Element,
   P: Parameters<CG>,
-  C: Ciphersuite<G = P::E, F = P::F>,
+  C: Clone + Ciphersuite<G = P::E, F = P::F>,
   G: EmbeddedCurve<FieldElement = C::F>,
 > Evrf<CG, P> for DdhEvrf<C, G>
 {
@@ -870,7 +870,7 @@ impl<
 
 #[test]
 fn test_ddh_evrf() {
-  type EvrfInstantiated = DdhEvrf<ciphersuite::Secp256k1, secq256k1::Point>;
+  type EvrfInstantiated = DdhEvrf<ciphersuite_kp256::Secp256k1, secq256k1::Point>;
   type Parameters = crate::Secp256k1<crate::CryptoPrimesStackCcykc>;
   type Element = class_groups::CryptoBigintStackElement;
 

@@ -1,6 +1,6 @@
 use subtle::{ConditionallySelectable, Choice};
 
-use crypto_bigint_seven::{ConstZero, CheckedDiv, Concat, Split, Limb, Uint};
+use crypto_bigint::{ConstZero, CheckedDiv, Concat, Split, Limb, Uint};
 
 use super::Limbs;
 
@@ -13,7 +13,7 @@ where
     Self::ZERO
   }
   fn is_zero(&self) -> Choice {
-    <Self as crypto_bigint_seven::Zero>::is_zero(self)
+    <Self as crypto_bigint::Zero>::is_zero(self)
   }
 
   fn as_limbs(&self) -> &[Limb] {

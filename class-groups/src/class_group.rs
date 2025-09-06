@@ -8,7 +8,7 @@ use ::malachite::{
   *,
 };
 
-use ::crypto_bigint::BoxedUint;
+use ::crypto_bigint_six::BoxedUint;
 use crypto_primes::generate_prime_with_rng;
 
 use crate::{

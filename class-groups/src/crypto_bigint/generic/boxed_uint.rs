@@ -1,6 +1,6 @@
 use subtle::Choice;
 
-use crypto_bigint_seven::{Zero, Resize, ConstantTimeSelect, ShlVartime, Limb, BoxedUint};
+use crypto_bigint::{Zero, Resize, ConstantTimeSelect, ShlVartime, Limb, BoxedUint};
 
 use super::Limbs;
 

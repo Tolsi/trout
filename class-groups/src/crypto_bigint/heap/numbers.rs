@@ -9,7 +9,7 @@ use core::{
 use subtle::{Choice, ConstantTimeEq, ConstantTimeLess, ConstantTimeGreater};
 use zeroize::Zeroize;
 
-use crypto_bigint_seven::{ConstantTimeSelect, Gcd, Resize, NonZero, BoxedUint};
+use crypto_bigint::{ConstantTimeSelect, Gcd, Resize, NonZero, BoxedUint};
 
 enum Cow<'a, B> {
   Borrowed(&'a B),

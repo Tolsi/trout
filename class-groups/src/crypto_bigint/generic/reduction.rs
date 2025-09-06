@@ -3,7 +3,7 @@
 
 use subtle::{ConstantTimeEq, Choice};
 
-use crypto_bigint_seven::{ConstantTimeSelect, Limb};
+use crypto_bigint::{ConstantTimeSelect, Limb};
 
 use super::Limbs;
 

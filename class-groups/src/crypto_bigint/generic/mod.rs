@@ -1,6 +1,6 @@
 use subtle::{ConstantTimeEq, Choice};
 
-use crypto_bigint_seven::{BitOps, Limb};
+use crypto_bigint::{BitOps, Limb};
 
 mod uint;
 mod boxed_uint;
@@ -51,7 +51,7 @@ trait Limbs: Sized + ConstantTimeEq + BitOps {
   fn ct_select(a: &Self, b: &Self, limbs: usize, choice: Choice) -> Self {
     let mut res = Self::zero(limbs);
     for l in 0 .. limbs {
-      res.as_mut_limbs()[l] = <_ as crypto_bigint_seven::ConstantTimeSelect>::ct_select(
+      res.as_mut_limbs()[l] = <_ as crypto_bigint::ConstantTimeSelect>::ct_select(
         &a.as_limbs()[l],
         &b.as_limbs()[l],
         choice,

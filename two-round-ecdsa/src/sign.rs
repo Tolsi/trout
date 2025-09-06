@@ -469,8 +469,26 @@ impl<PCG: Element, CG: Element, P: Parameters<PCG> + Parameters<CG>> Observing<P
         neg_U: -U.unwrap(),
         lagrange_coefficients: signing_set
           .iter()
-          .map(|participant| {
-            (*participant, dkg::lagrange::<<P as Parameters<PCG>>::F>(*participant, &signing_set))
+          .copied()
+          .map(|i| {
+            let i_f = <P as Parameters<PCG>>::F::from(u64::from(u16::from(i)));
+
+            let mut num = <P as Parameters<PCG>>::F::ONE;
+            let mut denom = <P as Parameters<PCG>>::F::ONE;
+            for l in &signing_set {
+              if i == *l {
+                continue;
+              }
+
+              let share = <P as Parameters<PCG>>::F::from(u64::from(u16::from(*l)));
+              num *= share;
+              denom *= share - i_f;
+            }
+
+            // Safe as this will only be 0 if we're part of the above loop
+            // (which we have an if case to avoid)
+            let lagrange = num * denom.invert().unwrap();
+            (i, lagrange)
           })
           .collect(),
         K_tilde_i_0_U_i,
