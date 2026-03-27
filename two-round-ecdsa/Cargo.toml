@@ -34,8 +34,14 @@ ec-divisors = { git = "https://github.com/monero-oxide/monero-oxide", rev = "721
 secq256k1 = { git = "https://github.com/serai-dex/serai", rev = "865e351f96bb90f05ad3f9966b631232192778ef", default-features = false, features = ["std"], optional = true }
 
 [dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
 ecdsa = { version = "0.16", default-features = false, features = ["std", "verifying"] }
 k256 = { version = "0.13", default-features = false, features = ["ecdsa"] }
+
+[[bench]]
+name = "sign"
+harness = false
+required-features = ["secp256k1"]
 
 [features]
 gmp = ["rug", "class-groups/gmp"]
